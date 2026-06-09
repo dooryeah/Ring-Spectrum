@@ -1,9 +1,9 @@
 {
-    "width": 884,
-    "height": 884,
-    "x": 100,
+    "width": 1038,
+    "height": 1038,
+    "x": 429,
     "y": 100,
-    "alpha": 80,
+    "alpha": 21,
     "sensitivity": 2.0,
     "start_color": [
         0,
@@ -15,7 +15,7 @@
         0,
         255
     ],
-    "bars": 217,
-    "decay": 0.8,
+    "bars": 120,
+    "decay": 0.9,
     "color_mode": "gradient"
 }
