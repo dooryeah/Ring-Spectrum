@@ -1,0 +1,12 @@
+{
+  "width": 800,
+  "height": 800,
+  "x": 100,
+  "y": 100,
+  "alpha": 80,
+  "sensitivity": 2.0,
+  "start_color": [0, 255, 255],
+  "end_color": [255, 0, 255],
+  "bars": 64,
+  "decay": 0.8
+}
