@@ -65,9 +65,12 @@ load_config()
 running = True
 need_resize = False
 need_alpha = False
+show_settings_flag = False
 smoothed_fft = np.zeros(config["bars"])
 
 # ---- Tkinter 调参窗口 ----
+tk_main_root = tk.Tk()
+tk_main_root.withdraw()
 tk_root = None
 
 def create_settings_window():
@@ -79,7 +82,7 @@ def create_settings_window():
         tk_root.lift()
         return
 
-    tk_root = tk.Tk()
+    tk_root = tk.Toplevel(tk_main_root)
     tk_root.title("Ring Spectrum - 设置")
     tk_root.geometry("360x600")
     tk_root.attributes("-topmost", True)
@@ -210,14 +213,15 @@ def create_image():
 
 def on_quit(icon, item):
     global running
-    save_config()
     running = False
-    icon.stop()
+    try:
+        icon.stop()
+    except Exception:
+        pass
 
 def on_settings(icon, item):
-    # 使用 tkinter 的 after 在主线程中创建/显示窗口
-    if tk_main_root is not None:
-        tk_main_root.after(0, create_settings_window)
+    global show_settings_flag
+    show_settings_flag = True
 
 icon = pystray.Icon("RingSpectrum", create_image(), "环形频谱", menu=pystray.Menu(
     pystray.MenuItem("设置", on_settings),
@@ -288,11 +292,11 @@ set_window_layering(hwnd, COLOR_KEY, config["alpha"])
 
 clock = pygame.time.Clock()
 
-# 创建初始隐藏的主 root 用于处理跨线程 tkinter 调用
-tk_main_root = tk.Tk()
-tk_main_root.withdraw()
-
 while running:
+    if show_settings_flag:
+        create_settings_window()
+        show_settings_flag = False
+
     try:
         tk_main_root.update()
         if tk_root is not None and tk_root.winfo_exists():
@@ -563,7 +567,11 @@ def check_autostart():
 autostart_var = tk.BooleanVar(value=check_autostart())
 ttk.Checkbutton(tk_root, text="开机自启 (Start on Boot)", variable=autostart_var, command=lambda: set_autostart(autostart_var.get())).pack(pady=5)
 
-ttk.Button(tk_root, text="完全退出程序", command=lambda: sys.exit(0)).pack(pady=5)
+def do_exit():
+    global running
+    running = False
+
+ttk.Button(tk_root, text="完全退出程序", command=do_exit).pack(pady=5)
 
 # ---- 音频处理 ----
 buffer_size = 1024 # 减小缓冲区大小以提升响应速度
@@ -829,11 +837,21 @@ while running:
 
 save_config()
 if 'stream' in globals():
-    stream.stop_stream()
-    stream.close()
-p.terminate()
+    try:
+        stream.stop_stream()
+        stream.close()
+    except Exception:
+        pass
 try:
-    tk_root.destroy()
-except:
+    p.terminate()
+except Exception:
     pass
-pygame.quit()
+try:
+    tk_main_root.destroy()
+except Exception:
+    pass
+try:
+    pygame.quit()
+except Exception:
+    pass
+os._exit(0)
