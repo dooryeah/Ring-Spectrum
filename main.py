@@ -197,7 +197,7 @@ def create_settings_window():
     ttk.Scale(tk_root, from_=0.5, to=5.0, variable=sens_var, command=gui_update).pack(fill='x', padx=20)
 
     ttk.Label(tk_root, text="柱子数量 (Bars):").pack()
-    ttk.Scale(tk_root, from_=20, to=120, variable=bars_var, command=gui_update).pack(fill='x', padx=20)
+    ttk.Scale(tk_root, from_=20, to=240, variable=bars_var, command=gui_update).pack(fill='x', padx=20)
 
     def get_overlay_options():
         opts = ["【默认】桌面底层", "【全局】始终置顶"]
