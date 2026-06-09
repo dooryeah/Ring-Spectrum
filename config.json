@@ -1,10 +1,10 @@
 {
-    "width": 763,
-    "height": 763,
-    "x": 353,
-    "y": 100,
-    "alpha": 10,
-    "sensitivity": 3.023121387283237,
+    "width": 484,
+    "height": 484,
+    "x": -92,
+    "y": 858,
+    "alpha": 25,
+    "sensitivity": 1.9176300578034682,
     "start_color": [
         136,
         255,
@@ -16,7 +16,7 @@
         255
     ],
     "bars": 240,
-    "decay": 0.6664739884393064,
+    "decay": 0.9,
     "color_mode": "gradient",
-    "overlay_target": "\u7ecb\u5b2a\u7c2d1"
+    "overlay_target": "Dooryeah730 on \u55b5\u5bbf"
 }
