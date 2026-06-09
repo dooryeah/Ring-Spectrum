@@ -1,6 +1,6 @@
 {
-    "width": 800,
-    "height": 800,
+    "width": 884,
+    "height": 884,
     "x": 100,
     "y": 100,
     "alpha": 80,
@@ -15,7 +15,7 @@
         0,
         255
     ],
-    "bars": 64,
+    "bars": 217,
     "decay": 0.8,
     "color_mode": "gradient"
 }

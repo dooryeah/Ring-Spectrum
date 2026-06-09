@@ -66,6 +66,8 @@ running = True
 need_resize = False
 need_alpha = False
 show_settings_flag = False
+force_z_update = True
+frame_count = 0
 smoothed_fft = np.zeros(config["bars"])
 
 # ---- Tkinter 调参窗口 ----
@@ -84,7 +86,7 @@ def create_settings_window():
 
     tk_root = tk.Toplevel(tk_main_root)
     tk_root.title("Ring Spectrum - 设置")
-    tk_root.geometry("360x600")
+    tk_root.geometry("400x650")
     tk_root.attributes("-topmost", True)
     tk_root.attributes("-toolwindow", True)
     
@@ -164,6 +166,33 @@ def create_settings_window():
 
     ttk.Label(tk_root, text="柱子数量 (Bars):").pack()
     ttk.Scale(tk_root, from_=20, to=120, variable=bars_var, command=gui_update).pack(fill='x', padx=20)
+
+    def get_overlay_options():
+        opts = ["【默认】桌面底层", "【全局】始终置顶"]
+        def enum_win(h, ctx):
+            if win32gui.IsWindowVisible(h):
+                title = win32gui.GetWindowText(h)
+                if title and title not in ["Program Manager", "Ring Spectrum - 设置"]:
+                    opts.append(title)
+        win32gui.EnumWindows(enum_win, None)
+        seen = set()
+        return [o for o in opts if not (o in seen or seen.add(o))]
+
+    overlay_var = tk.StringVar(value=config.get("overlay_target", "【默认】桌面底层"))
+    
+    overlay_frame = ttk.Frame(tk_root)
+    overlay_frame.pack(fill='x', padx=20, pady=5)
+    ttk.Label(overlay_frame, text="显示层级:").pack(side='left')
+    overlay_cb = ttk.Combobox(overlay_frame, textvariable=overlay_var, state="readonly", width=25)
+    overlay_cb.pack(side='left', padx=5)
+    overlay_cb.configure(postcommand=lambda: overlay_cb.configure(values=get_overlay_options()))
+
+    def on_overlay_change(*args):
+        config["overlay_target"] = overlay_var.get()
+        global force_z_update
+        force_z_update = True
+
+    overlay_var.trace_add("write", on_overlay_change)
 
     ttk.Label(tk_root, text="衰减速度 (Decay):").pack()
     ttk.Scale(tk_root, from_=0.1, to=0.9, variable=decay_var, command=gui_update).pack(fill='x', padx=20)
@@ -279,11 +308,14 @@ pygame.init()
 def set_window_layering(hwnd, color_key, alpha):
     ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
     # WS_EX_TRANSPARENT 使得鼠标点击穿透，不再处理 Pygame 的鼠标事件
-    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style | win32con.WS_EX_LAYERED | win32con.WS_EX_TOPMOST | win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_TRANSPARENT)
+    # 移除强制的 WS_EX_TOPMOST，交给主循环的 Z-order 逻辑动态处理
+    new_style = (ex_style | win32con.WS_EX_LAYERED | win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_TRANSPARENT) & ~win32con.WS_EX_TOPMOST
+    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, new_style)
     win32gui.SetLayeredWindowAttributes(hwnd, win32api.RGB(*color_key), int(255 * alpha / 100), win32con.LWA_COLORKEY | win32con.LWA_ALPHA)
 
 def update_window_pos(hwnd, x, y, width, height):
-    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, x, y, width, height, win32con.SWP_SHOWWINDOW)
+    # 使用 SWP_NOZORDER 保持当前的层级，不覆盖上面计算的Z-order
+    win32gui.SetWindowPos(hwnd, 0, x, y, width, height, win32con.SWP_SHOWWINDOW | win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE)
 
 screen = pygame.display.set_mode((config["width"], config["height"]), pygame.NOFRAME)
 hwnd = pygame.display.get_wm_info()["window"]
@@ -293,6 +325,23 @@ set_window_layering(hwnd, COLOR_KEY, config["alpha"])
 clock = pygame.time.Clock()
 
 while running:
+    frame_count += 1
+    if frame_count % 15 == 0 or force_z_update:
+        force_z_update = False
+        target = config.get("overlay_target", "【默认】桌面底层")
+        if target == "【默认】桌面底层":
+            win32gui.SetWindowPos(hwnd, win32con.HWND_BOTTOM, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+        elif target == "【全局】始终置顶":
+            win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+        else:
+            target_hwnd = win32gui.FindWindow(None, target)
+            if target_hwnd:
+                win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+                prev = win32gui.GetWindow(target_hwnd, win32con.GW_HWNDPREV)
+                if prev != hwnd:
+                    insert_after = prev if prev != 0 else win32con.HWND_TOP
+                    win32gui.SetWindowPos(hwnd, insert_after, 0, 0, 0, 0, win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+
     if show_settings_flag:
         create_settings_window()
         show_settings_flag = False
