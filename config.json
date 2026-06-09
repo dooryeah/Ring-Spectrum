@@ -1,21 +1,22 @@
 {
-    "width": 1038,
-    "height": 1038,
-    "x": 429,
+    "width": 763,
+    "height": 763,
+    "x": 353,
     "y": 100,
-    "alpha": 21,
-    "sensitivity": 2.0,
+    "alpha": 10,
+    "sensitivity": 3.023121387283237,
     "start_color": [
-        0,
+        136,
         255,
         255
     ],
     "end_color": [
         255,
-        0,
+        155,
         255
     ],
-    "bars": 120,
-    "decay": 0.9,
-    "color_mode": "gradient"
+    "bars": 240,
+    "decay": 0.6664739884393064,
+    "color_mode": "gradient",
+    "overlay_target": "\u7ecb\u5b2a\u7c2d1"
 }

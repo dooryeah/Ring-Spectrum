@@ -69,8 +69,7 @@ show_settings_flag = False
 force_z_update = True
 frame_count = 0
 smoothed_fft = np.zeros(config["bars"])
-exact_cx = config["x"] + config["width"] / 2.0
-exact_cy = config["y"] + config["height"] / 2.0
+
 
 # ---- Tkinter 调参窗口 ----
 tk_main_root = tk.Tk()
@@ -97,47 +96,35 @@ def create_settings_window():
     tk_root.protocol("WM_DELETE_WINDOW", on_closing)
 
     size_var = tk.DoubleVar(value=config["width"])
-    x_var = tk.IntVar(value=config["x"])
-    y_var = tk.IntVar(value=config["y"])
+    cx_var = tk.IntVar(value=int(config["x"] + config["width"] / 2.0))
+    cy_var = tk.IntVar(value=int(config["y"] + config["height"] / 2.0))
     alpha_var = tk.DoubleVar(value=config["alpha"])
     sens_var = tk.DoubleVar(value=config["sensitivity"])
     bars_var = tk.DoubleVar(value=config["bars"])
     decay_var = tk.DoubleVar(value=config["decay"])
 
     def gui_update(*args):
-        global need_resize, need_alpha, smoothed_fft, exact_cx, exact_cy
+        global need_resize, need_alpha, smoothed_fft
         
         try:
-            new_x = int(x_var.get())
+            new_cx = int(cx_var.get())
         except Exception:
-            new_x = config["x"]
+            new_cx = int(config["x"] + config["width"] / 2.0)
         try:
-            new_y = int(y_var.get())
+            new_cy = int(cy_var.get())
         except Exception:
-            new_y = config["y"]
+            new_cy = int(config["y"] + config["height"] / 2.0)
 
-        # 检查是否是用户主动修改了X/Y
-        pos_changed = False
-        if new_x != config["x"] or new_y != config["y"]:
-            config["x"] = new_x
-            config["y"] = new_y
-            exact_cx = new_x + config["width"] / 2.0
-            exact_cy = new_y + config["height"] / 2.0
-            pos_changed = True
-            need_resize = True
-
-        # 处理圆心锚定缩放：基于无损精度的 exact_cx 重新计算
         new_size = int(size_var.get())
-        if new_size != config["width"]:
+        
+        expected_x = int(new_cx - new_size / 2.0)
+        expected_y = int(new_cy - new_size / 2.0)
+        
+        if expected_x != config["x"] or expected_y != config["y"] or new_size != config["width"]:
+            config["x"] = expected_x
+            config["y"] = expected_y
             config["width"] = new_size
             config["height"] = new_size
-            
-            config["x"] = int(exact_cx - new_size / 2.0)
-            config["y"] = int(exact_cy - new_size / 2.0)
-            
-            # 临时移除 trace 以防止递归触发
-            x_var.set(config["x"])
-            y_var.set(config["y"])
             need_resize = True
 
         new_alpha = int(alpha_var.get())
@@ -177,18 +164,18 @@ def create_settings_window():
 
     pos_frame = ttk.Frame(tk_root)
     pos_frame.pack(pady=5)
-    ttk.Label(pos_frame, text="位置 X:").pack(side='left')
-    create_repeat_btn(pos_frame, "-", lambda: x_var.set(x_var.get() - 1)).pack(side='left')
-    ttk.Entry(pos_frame, textvariable=x_var, width=6).pack(side='left', padx=2)
-    create_repeat_btn(pos_frame, "+", lambda: x_var.set(x_var.get() + 1)).pack(side='left')
+    ttk.Label(pos_frame, text="圆心 X:").pack(side='left')
+    create_repeat_btn(pos_frame, "-", lambda: cx_var.set(cx_var.get() - 1)).pack(side='left')
+    ttk.Entry(pos_frame, textvariable=cx_var, width=6).pack(side='left', padx=2)
+    create_repeat_btn(pos_frame, "+", lambda: cx_var.set(cx_var.get() + 1)).pack(side='left')
     
-    ttk.Label(pos_frame, text="  位置 Y:").pack(side='left')
-    create_repeat_btn(pos_frame, "-", lambda: y_var.set(y_var.get() - 1)).pack(side='left')
-    ttk.Entry(pos_frame, textvariable=y_var, width=6).pack(side='left', padx=2)
-    create_repeat_btn(pos_frame, "+", lambda: y_var.set(y_var.get() + 1)).pack(side='left')
+    ttk.Label(pos_frame, text="  圆心 Y:").pack(side='left')
+    create_repeat_btn(pos_frame, "-", lambda: cy_var.set(cy_var.get() - 1)).pack(side='left')
+    ttk.Entry(pos_frame, textvariable=cy_var, width=6).pack(side='left', padx=2)
+    create_repeat_btn(pos_frame, "+", lambda: cy_var.set(cy_var.get() + 1)).pack(side='left')
 
-    x_var.trace_add("write", lambda *args: gui_update())
-    y_var.trace_add("write", lambda *args: gui_update())
+    cx_var.trace_add("write", lambda *args: gui_update())
+    cy_var.trace_add("write", lambda *args: gui_update())
 
     ttk.Label(tk_root, text="透明度 (Alpha %):").pack()
     ttk.Scale(tk_root, from_=10, to=100, variable=alpha_var, command=gui_update).pack(fill='x', padx=20)
