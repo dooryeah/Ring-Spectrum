@@ -4,13 +4,12 @@ import json
 import pygame
 import numpy as np
 import pyaudiowpatch as pyaudio
-import random
 import win32api
 import win32con
 import win32gui
 import math
 import tkinter as tk
-from tkinter import ttk, colorchooser
+from tkinter import ttk, colorchooser, messagebox
 from scipy.ndimage import gaussian_filter1d
 import pystray
 from PIL import Image, ImageDraw
@@ -33,7 +32,12 @@ DEFAULT_CONFIG = {
     "end_color": [255, 0, 255],
     "bars": 64,
     "decay": 0.8,
-    "color_mode": "gradient"
+    "color_mode": "gradient",
+    "spectrum_style": "ring",
+    "spectrum_flip": False,
+    "spectrum_rotate_90": False,
+    "bar_height": 100.0,
+    "bar_length": 100.0
 }
 
 config = {}
@@ -87,7 +91,7 @@ def create_settings_window():
 
     tk_root = tk.Toplevel(tk_main_root)
     tk_root.title("Ring Spectrum - 设置")
-    tk_root.geometry("400x650")
+    tk_root.geometry("400x850")
     tk_root.attributes("-topmost", True)
     tk_root.attributes("-toolwindow", True)
     
@@ -102,6 +106,8 @@ def create_settings_window():
     sens_var = tk.DoubleVar(value=config["sensitivity"])
     bars_var = tk.DoubleVar(value=config["bars"])
     decay_var = tk.DoubleVar(value=config["decay"])
+    bar_height_var = tk.DoubleVar(value=config.get("bar_height", 100.0))
+    bar_length_var = tk.DoubleVar(value=config.get("bar_length", 100.0))
 
     def gui_update(*args):
         global need_resize, need_alpha, smoothed_fft
@@ -140,8 +146,10 @@ def create_settings_window():
             smoothed_fft = np.zeros(new_bars)
             
         config["decay"] = float(decay_var.get())
+        config["bar_height"] = float(bar_height_var.get())
+        config["bar_length"] = float(bar_length_var.get())
 
-    ttk.Label(tk_root, text="窗口大小 (圆心锚定缩放):").pack(pady=(10,0))
+    ttk.Label(tk_root, text="窗口大小 (频谱中心点锚定缩放):").pack(pady=(10,0))
     ttk.Scale(tk_root, from_=100, to=1500, variable=size_var, command=gui_update).pack(fill='x', padx=20)
     
     def create_repeat_btn(parent, text, action):
@@ -164,18 +172,135 @@ def create_settings_window():
 
     pos_frame = ttk.Frame(tk_root)
     pos_frame.pack(pady=5)
-    ttk.Label(pos_frame, text="圆心 X:").pack(side='left')
+    ttk.Label(pos_frame, text="频谱中心点 X:").pack(side='left')
     create_repeat_btn(pos_frame, "-", lambda: cx_var.set(cx_var.get() - 1)).pack(side='left')
     ttk.Entry(pos_frame, textvariable=cx_var, width=6).pack(side='left', padx=2)
     create_repeat_btn(pos_frame, "+", lambda: cx_var.set(cx_var.get() + 1)).pack(side='left')
     
-    ttk.Label(pos_frame, text="  圆心 Y:").pack(side='left')
+    ttk.Label(pos_frame, text="  频谱中心点 Y:").pack(side='left')
     create_repeat_btn(pos_frame, "-", lambda: cy_var.set(cy_var.get() - 1)).pack(side='left')
     ttk.Entry(pos_frame, textvariable=cy_var, width=6).pack(side='left', padx=2)
     create_repeat_btn(pos_frame, "+", lambda: cy_var.set(cy_var.get() + 1)).pack(side='left')
 
     cx_var.trace_add("write", lambda *args: gui_update())
     cy_var.trace_add("write", lambda *args: gui_update())
+
+    def get_current_monitor_rect():
+        cx = int(config["x"] + config["width"] / 2.0)
+        cy = int(config["y"] + config["height"] / 2.0)
+        monitor = win32api.MonitorFromPoint((cx, cy), win32con.MONITOR_DEFAULTTONEAREST)
+        return win32api.GetMonitorInfo(monitor)["Monitor"]
+
+    def get_spectrum_bounds():
+        width = config["width"]
+        height = config["height"]
+        style = config.get("spectrum_style", "ring")
+
+        if style != "bar":
+            bars = max(1, int(config["bars"]))
+            radius_outer = min(width, height) / 2
+            radius_inner = min(width, height) / 4
+            radius_base = radius_outer if bool(config.get("spectrum_flip", False)) else radius_inner
+            ring_size = radius_outer - radius_inner
+            visible_outer_radius = radius_base if bool(config.get("spectrum_flip", False)) else radius_base + ring_size
+            bar_width = max(1, int((2 * math.pi * radius_inner / bars) * 0.8))
+            bound_radius = min(radius_outer, visible_outer_radius + bar_width / 2)
+            center_x = width / 2
+            center_y = height / 2
+            return center_x - bound_radius, center_y - bound_radius, center_x + bound_radius, center_y + bound_radius
+
+        bars = max(1, int(config["bars"]))
+        is_flipped = bool(config.get("spectrum_flip", False))
+        is_rotated = bool(config.get("spectrum_rotate_90", False))
+        bar_length_ratio = max(0.05, min(1.0, float(config.get("bar_length", 100.0)) / 100.0))
+
+        if is_rotated:
+            margin_y = max(8, height * 0.03)
+            edge_padding = max(8, width * 0.06)
+            baseline = width / 2
+            max_len = max(1, baseline - edge_padding)
+            axis_span = max(1, height - margin_y * 2) * bar_length_ratio
+            axis_start = (height - axis_span) / 2
+            slot_height = max(1, axis_span) / bars
+            bar_width = max(1, int(slot_height * 0.72))
+            half_width = bar_width / 2
+            top = axis_start + slot_height / 2 - half_width
+            bottom = axis_start + slot_height * (bars - 0.5) + half_width
+
+            if is_flipped:
+                left = baseline - max_len - half_width
+                right = baseline + half_width
+            else:
+                left = baseline - half_width
+                right = baseline + max_len + half_width
+        else:
+            margin_x = max(8, width * 0.03)
+            edge_padding = max(8, height * 0.06)
+            baseline = height / 2
+            max_len = max(1, baseline - edge_padding)
+            axis_span = max(1, width - margin_x * 2) * bar_length_ratio
+            axis_start = (width - axis_span) / 2
+            slot_width = max(1, axis_span) / bars
+            bar_width = max(1, int(slot_width * 0.72))
+            half_width = bar_width / 2
+            left = axis_start + slot_width / 2 - half_width
+            right = axis_start + slot_width * (bars - 0.5) + half_width
+
+            if is_flipped:
+                top = baseline - half_width
+                bottom = baseline + max_len + half_width
+            else:
+                top = baseline - max_len - half_width
+                bottom = baseline + half_width
+
+        return left, top, right, bottom
+
+    def align_spectrum(option):
+        monitor_left, monitor_top, monitor_right, monitor_bottom = get_current_monitor_rect()
+        bounds_left, bounds_top, bounds_right, bounds_bottom = get_spectrum_bounds()
+        current_x = config["x"]
+        current_y = config["y"]
+        new_x = current_x
+        new_y = current_y
+
+        if option == "靠左":
+            new_x = math.floor(monitor_left - bounds_left)
+        elif option == "靠右":
+            new_x = math.ceil(monitor_right - bounds_right)
+        elif option == "靠上":
+            new_y = math.floor(monitor_top - bounds_top)
+        elif option == "靠下":
+            new_y = math.ceil(monitor_bottom - bounds_bottom)
+        elif option == "X轴居中":
+            screen_center_x = (monitor_left + monitor_right) / 2
+            spectrum_center_x = (bounds_left + bounds_right) / 2
+            new_x = round(screen_center_x - spectrum_center_x)
+        elif option == "Y轴居中":
+            screen_center_y = (monitor_top + monitor_bottom) / 2
+            spectrum_center_y = (bounds_top + bounds_bottom) / 2
+            new_y = round(screen_center_y - spectrum_center_y)
+
+        if new_x != current_x:
+            cx_var.set(int(new_x + math.ceil(config["width"] / 2.0)))
+        if new_y != current_y:
+            cy_var.set(int(new_y + math.ceil(config["height"] / 2.0)))
+
+    align_options = ["选择对齐", "靠左", "靠右", "靠上", "靠下", "X轴居中", "Y轴居中"]
+    align_var = tk.StringVar(value=align_options[0])
+    align_frame = ttk.Frame(tk_root)
+    align_frame.pack(fill='x', padx=20, pady=5)
+    ttk.Label(align_frame, text="屏幕对齐:").pack(side='left')
+    align_cb = ttk.Combobox(align_frame, textvariable=align_var, values=align_options, state="readonly", width=25)
+    align_cb.pack(side='left', padx=5)
+
+    def on_align_selected(event=None):
+        option = align_var.get()
+        if option == align_options[0]:
+            return
+        align_spectrum(option)
+        align_var.set(align_options[0])
+
+    align_cb.bind("<<ComboboxSelected>>", on_align_selected)
 
     ttk.Label(tk_root, text="透明度 (Alpha %):").pack()
     ttk.Scale(tk_root, from_=10, to=100, variable=alpha_var, command=gui_update).pack(fill='x', padx=20)
@@ -185,6 +310,46 @@ def create_settings_window():
 
     ttk.Label(tk_root, text="柱子数量 (Bars):").pack()
     ttk.Scale(tk_root, from_=20, to=240, variable=bars_var, command=gui_update).pack(fill='x', padx=20)
+
+    spectrum_style = tk.StringVar(value=config.get("spectrum_style", "ring"))
+
+    def on_style_change():
+        config["spectrum_style"] = spectrum_style.get()
+        update_bar_controls_visibility()
+
+    ttk.Label(tk_root, text="频谱样式:").pack(pady=(10,0))
+    frame_style = ttk.Frame(tk_root)
+    frame_style.pack()
+    ttk.Radiobutton(frame_style, text="条状", variable=spectrum_style, value="bar", command=on_style_change).pack(side='left', padx=10)
+    ttk.Radiobutton(frame_style, text="环状", variable=spectrum_style, value="ring", command=on_style_change).pack(side='left', padx=10)
+
+    bar_params_frame = ttk.Frame(tk_root)
+    ttk.Label(bar_params_frame, text="条形高度 (%):").pack()
+    ttk.Scale(bar_params_frame, from_=10, to=200, variable=bar_height_var, command=gui_update).pack(fill='x', padx=20)
+    ttk.Label(bar_params_frame, text="条形长度 (%):").pack()
+    ttk.Scale(bar_params_frame, from_=10, to=100, variable=bar_length_var, command=gui_update).pack(fill='x', padx=20)
+
+    def update_bar_controls_visibility():
+        if spectrum_style.get() == "bar":
+            bar_params_frame.pack(fill='x', after=frame_style)
+        else:
+            bar_params_frame.pack_forget()
+
+    update_bar_controls_visibility()
+
+    spectrum_flip = tk.BooleanVar(value=bool(config.get("spectrum_flip", False)))
+    spectrum_rotate_90 = tk.BooleanVar(value=bool(config.get("spectrum_rotate_90", False)))
+
+    def on_flip_change():
+        config["spectrum_flip"] = bool(spectrum_flip.get())
+
+    def on_rotate_90_change():
+        config["spectrum_rotate_90"] = bool(spectrum_rotate_90.get())
+
+    transform_frame = ttk.Frame(tk_root)
+    transform_frame.pack(pady=(5,0))
+    ttk.Checkbutton(transform_frame, text="频谱翻转", variable=spectrum_flip, command=on_flip_change).pack(side='left', padx=10)
+    ttk.Checkbutton(transform_frame, text="旋转90°", variable=spectrum_rotate_90, command=on_rotate_90_change).pack(side='left', padx=10)
 
     def get_overlay_options():
         opts = ["【默认】桌面底层", "【全局】始终置顶"]
@@ -246,7 +411,7 @@ def create_settings_window():
 
     def do_save():
         save_config()
-        tk.messagebox.showinfo("成功", "配置已保存", parent=tk_root)
+        messagebox.showinfo("成功", "配置已保存", parent=tk_root)
         
     ttk.Button(tk_root, text="保存配置", command=do_save).pack(pady=(15,5))
     ttk.Button(tk_root, text="关闭面板", command=on_closing).pack(pady=5)
@@ -343,6 +508,15 @@ set_window_layering(hwnd, COLOR_KEY, config["alpha"])
 
 clock = pygame.time.Clock()
 
+def get_spectrum_color(index, total):
+    sc = config["start_color"]
+    ec = config["end_color"]
+    ratio = index / max(1, total - 1)
+    r = int(sc[0] + (ec[0] - sc[0]) * ratio)
+    g = int(sc[1] + (ec[1] - sc[1]) * ratio)
+    b = int(sc[2] + (ec[2] - sc[2]) * ratio)
+    return (r, g, b)
+
 while running:
     frame_count += 1
     if frame_count % 15 == 0 or force_z_update:
@@ -412,40 +586,92 @@ while running:
     screen.fill(COLOR_KEY)
     
     width, height = config["width"], config["height"]
-    center = (width // 2, height // 2)
-    radius_inner = min(width, height) // 4
+    style = config.get("spectrum_style", "ring")
+    is_flipped = bool(config.get("spectrum_flip", False))
+    is_rotated = bool(config.get("spectrum_rotate_90", False))
 
-    sc = config["start_color"]
-    ec = config["end_color"]
+    if style == "bar":
+        bar_height_ratio = max(0.05, min(2.0, float(config.get("bar_height", 100.0)) / 100.0))
+        bar_length_ratio = max(0.05, min(1.0, float(config.get("bar_length", 100.0)) / 100.0))
 
-    for i in range(bars):
-        angle = i * (2 * np.pi / bars) - np.pi / 2
-        length = smoothed_fft[i]
-        
-        if length < 2:
-            continue
+        if is_rotated:
+            margin_y = max(8, height * 0.03)
+            edge_padding = max(8, width * 0.06)
+            baseline = width / 2
+            max_len = max(1, baseline - edge_padding)
+            axis_span = max(1, height - margin_y * 2) * bar_length_ratio
+            axis_start = (height - axis_span) / 2
+            slot_height = max(1, axis_span) / bars
+            bar_width = max(1, int(slot_height * 0.72))
+
+            for i in range(bars):
+                length = smoothed_fft[i]
+
+                if length < 2:
+                    continue
+
+                length = min(length * bar_height_ratio, max_len)
+                y = axis_start + slot_height * i + slot_height / 2
+                x_end = baseline - length if is_flipped else baseline + length
+                color = get_spectrum_color(i, bars)
+
+                pygame.draw.line(screen, color, (baseline, y), (x_end, y), bar_width)
+                if bar_width > 2:
+                    pygame.draw.circle(screen, color, (int(x_end), int(y)), bar_width // 2)
+        else:
+            margin_x = max(8, width * 0.03)
+            edge_padding = max(8, height * 0.06)
+            baseline = height / 2
+            max_len = max(1, baseline - edge_padding)
+            axis_span = max(1, width - margin_x * 2) * bar_length_ratio
+            axis_start = (width - axis_span) / 2
+            slot_width = max(1, axis_span) / bars
+            bar_width = max(1, int(slot_width * 0.72))
+
+            for i in range(bars):
+                length = smoothed_fft[i]
+
+                if length < 2:
+                    continue
+
+                length = min(length * bar_height_ratio, max_len)
+                x = axis_start + slot_width * i + slot_width / 2
+                y_end = baseline + length if is_flipped else baseline - length
+                color = get_spectrum_color(i, bars)
+
+                pygame.draw.line(screen, color, (x, baseline), (x, y_end), bar_width)
+                if bar_width > 2:
+                    pygame.draw.circle(screen, color, (int(x), int(y_end)), bar_width // 2)
+    else:
+        center = (width // 2, height // 2)
+        radius_outer = min(width, height) / 2
+        radius_inner = min(width, height) / 4
+        radius_base = radius_outer if is_flipped else radius_inner
+        ring_size = radius_outer - radius_inner
+        angle_offset = np.pi / 2 if is_rotated else 0
+        max_len = max(1, ring_size)
+
+        for i in range(bars):
+            angle = i * (2 * np.pi / bars) - np.pi / 2 + angle_offset
+            length = smoothed_fft[i]
             
-        max_len = min(width, height) // 2 - radius_inner - 10
-        length = min(length, max_len)
-        
-        start_x = center[0] + radius_inner * np.cos(angle)
-        start_y = center[1] + radius_inner * np.sin(angle)
-        
-        end_x = center[0] + (radius_inner + length) * np.cos(angle)
-        end_y = center[1] + (radius_inner + length) * np.sin(angle)
-        
-        ratio = i / max(1, bars - 1)
-        r = int(sc[0] + (ec[0] - sc[0]) * ratio)
-        g = int(sc[1] + (ec[1] - sc[1]) * ratio)
-        b = int(sc[2] + (ec[2] - sc[2]) * ratio)
-        color = (r, g, b)
-        
-        bar_width = max(1, int((2 * np.pi * radius_inner / bars) * 0.8))
-        pygame.draw.line(screen, color, (start_x, start_y), (end_x, end_y), bar_width)
-        if bar_width > 2:
-            pygame.draw.circle(screen, color, (int(end_x), int(end_y)), bar_width // 2)
-
-    pygame.draw.circle(screen, COLOR_KEY, center, radius_inner)
+            if length < 2:
+                continue
+                
+            length = min(length, max_len)
+            end_radius = radius_base - length if is_flipped else radius_base + length
+            
+            start_x = center[0] + radius_base * np.cos(angle)
+            start_y = center[1] + radius_base * np.sin(angle)
+            
+            end_x = center[0] + end_radius * np.cos(angle)
+            end_y = center[1] + end_radius * np.sin(angle)
+            color = get_spectrum_color(i, bars)
+            
+            bar_width = max(1, int((2 * np.pi * radius_inner / bars) * 0.8))
+            pygame.draw.line(screen, color, (start_x, start_y), (end_x, end_y), bar_width)
+            if bar_width > 2:
+                pygame.draw.circle(screen, color, (int(end_x), int(end_y)), bar_width // 2)
 
     pygame.display.flip()
     clock.tick(60)
