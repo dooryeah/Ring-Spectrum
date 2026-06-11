@@ -8,6 +8,8 @@ import win32api
 import win32con
 import win32gui
 import math
+import ctypes
+from ctypes import wintypes
 import tkinter as tk
 from tkinter import ttk, colorchooser, messagebox
 from scipy.ndimage import gaussian_filter1d
@@ -21,6 +23,229 @@ else:
     application_path = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_FILE = os.path.join(application_path, "config.json")
+ROOT_FADE_LEVELS = 64
+COLOR_MODE_SOLID = "solid"
+COLOR_MODE_ENDPOINT = "gradient"
+COLOR_MODE_VERTICAL = "vertical_gradient"
+
+AC_SRC_OVER = 0x00
+AC_SRC_ALPHA = 0x01
+ULW_ALPHA = 0x00000002
+BI_RGB = 0
+DIB_RGB_COLORS = 0
+
+user32 = ctypes.windll.user32
+gdi32 = ctypes.windll.gdi32
+
+
+class POINT(ctypes.Structure):
+    _fields_ = [
+        ("x", wintypes.LONG),
+        ("y", wintypes.LONG)
+    ]
+
+
+class SIZE(ctypes.Structure):
+    _fields_ = [
+        ("cx", wintypes.LONG),
+        ("cy", wintypes.LONG)
+    ]
+
+
+class BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [
+        ("BlendOp", ctypes.c_ubyte),
+        ("BlendFlags", ctypes.c_ubyte),
+        ("SourceConstantAlpha", ctypes.c_ubyte),
+        ("AlphaFormat", ctypes.c_ubyte)
+    ]
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD)
+    ]
+
+
+class BITMAPINFO(ctypes.Structure):
+    _fields_ = [
+        ("bmiHeader", BITMAPINFOHEADER),
+        ("bmiColors", wintypes.DWORD * 3)
+    ]
+
+
+user32.GetDC.argtypes = [wintypes.HWND]
+user32.GetDC.restype = wintypes.HDC
+user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+user32.ReleaseDC.restype = ctypes.c_int
+user32.UpdateLayeredWindow.argtypes = [
+    wintypes.HWND,
+    wintypes.HDC,
+    ctypes.POINTER(POINT),
+    ctypes.POINTER(SIZE),
+    wintypes.HDC,
+    ctypes.POINTER(POINT),
+    wintypes.DWORD,
+    ctypes.POINTER(BLENDFUNCTION),
+    wintypes.DWORD
+]
+user32.UpdateLayeredWindow.restype = wintypes.BOOL
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+gdi32.DeleteDC.argtypes = [wintypes.HDC]
+gdi32.DeleteDC.restype = wintypes.BOOL
+gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
+gdi32.SelectObject.restype = wintypes.HANDLE
+gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+gdi32.DeleteObject.restype = wintypes.BOOL
+gdi32.CreateDIBSection.argtypes = [
+    wintypes.HDC,
+    ctypes.POINTER(BITMAPINFO),
+    wintypes.UINT,
+    ctypes.POINTER(ctypes.c_void_p),
+    wintypes.HANDLE,
+    wintypes.DWORD
+]
+gdi32.CreateDIBSection.restype = wintypes.HANDLE
+
+
+class LayeredWindowBitmap:
+    def __init__(self):
+        self.width = 0
+        self.height = 0
+        self.mem_dc = None
+        self.bitmap = None
+        self.old_bitmap = None
+        self.bits = None
+        self.bgra = None
+        self.alpha_buffer = None
+        self.channel_buffer = None
+
+    def close(self):
+        if self.mem_dc and self.old_bitmap:
+            gdi32.SelectObject(self.mem_dc, self.old_bitmap)
+        if self.bitmap:
+            gdi32.DeleteObject(self.bitmap)
+        if self.mem_dc:
+            gdi32.DeleteDC(self.mem_dc)
+        self.width = 0
+        self.height = 0
+        self.mem_dc = None
+        self.bitmap = None
+        self.old_bitmap = None
+        self.bits = None
+        self.bgra = None
+        self.alpha_buffer = None
+        self.channel_buffer = None
+
+    def ensure_size(self, width, height):
+        if self.width == width and self.height == height and self.mem_dc and self.bitmap:
+            return
+
+        self.close()
+        screen_dc = user32.GetDC(None)
+        try:
+            self.mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+            if not self.mem_dc:
+                raise ctypes.WinError()
+
+            bitmap_info = BITMAPINFO()
+            bitmap_info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bitmap_info.bmiHeader.biWidth = width
+            bitmap_info.bmiHeader.biHeight = -height
+            bitmap_info.bmiHeader.biPlanes = 1
+            bitmap_info.bmiHeader.biBitCount = 32
+            bitmap_info.bmiHeader.biCompression = BI_RGB
+            bitmap_info.bmiHeader.biSizeImage = width * height * 4
+
+            bits = ctypes.c_void_p()
+            self.bitmap = gdi32.CreateDIBSection(
+                self.mem_dc,
+                ctypes.byref(bitmap_info),
+                DIB_RGB_COLORS,
+                ctypes.byref(bits),
+                None,
+                0
+            )
+            if not self.bitmap or not bits.value:
+                raise ctypes.WinError()
+
+            self.old_bitmap = gdi32.SelectObject(self.mem_dc, self.bitmap)
+            self.bits = bits
+            self.width = width
+            self.height = height
+            self.bgra = np.empty((height, width, 4), dtype=np.uint8)
+            self.alpha_buffer = np.empty((height, width), dtype=np.uint16)
+            self.channel_buffer = np.empty((height, width), dtype=np.uint16)
+        finally:
+            user32.ReleaseDC(None, screen_dc)
+
+    def update(self, hwnd, surface, x, y, alpha_mask=None, color_mask=None):
+        width, height = surface.get_size()
+        self.ensure_size(width, height)
+
+        rgb = pygame.surfarray.pixels3d(surface)
+        alpha = pygame.surfarray.pixels_alpha(surface)
+        try:
+            alpha_src = alpha.T
+            if alpha_mask is not None:
+                np.multiply(alpha_src, alpha_mask, out=self.alpha_buffer, casting="unsafe")
+                np.floor_divide(self.alpha_buffer, 255, out=self.alpha_buffer)
+            else:
+                np.copyto(self.alpha_buffer, alpha_src, casting="unsafe")
+
+            np.copyto(self.bgra[:, :, 3], self.alpha_buffer, casting="unsafe")
+            for dst_channel, src_channel in ((0, 2), (1, 1), (2, 0)):
+                if color_mask is not None:
+                    np.multiply(
+                        color_mask[:, :, src_channel],
+                        self.alpha_buffer,
+                        out=self.channel_buffer,
+                        casting="unsafe"
+                    )
+                else:
+                    np.multiply(rgb[:, :, src_channel].T, self.alpha_buffer, out=self.channel_buffer, casting="unsafe")
+                np.floor_divide(self.channel_buffer, 255, out=self.channel_buffer)
+                np.copyto(self.bgra[:, :, dst_channel], self.channel_buffer, casting="unsafe")
+        finally:
+            del alpha
+            del rgb
+
+        ctypes.memmove(self.bits.value, self.bgra.ctypes.data, self.bgra.nbytes)
+
+        screen_dc = user32.GetDC(None)
+        try:
+            dst_point = POINT(int(x), int(y))
+            size = SIZE(width, height)
+            src_point = POINT(0, 0)
+            blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
+            updated = user32.UpdateLayeredWindow(
+                hwnd,
+                screen_dc,
+                ctypes.byref(dst_point),
+                ctypes.byref(size),
+                self.mem_dc,
+                ctypes.byref(src_point),
+                0,
+                ctypes.byref(blend),
+                ULW_ALPHA
+            )
+            if not updated:
+                raise ctypes.WinError()
+        finally:
+            user32.ReleaseDC(None, screen_dc)
+
+
 DEFAULT_CONFIG = {
     "width": 600,
     "height": 600,
@@ -32,15 +257,21 @@ DEFAULT_CONFIG = {
     "end_color": [255, 0, 255],
     "bars": 64,
     "decay": 0.8,
-    "color_mode": "gradient",
+    "color_mode": COLOR_MODE_ENDPOINT,
     "spectrum_style": "ring",
     "spectrum_flip": False,
     "spectrum_rotate_90": False,
+    "spectrum_root_fade": False,
     "bar_height": 100.0,
     "bar_length": 100.0
 }
 
 config = {}
+
+def normalize_color_mode(mode):
+    if mode in (COLOR_MODE_SOLID, COLOR_MODE_ENDPOINT, COLOR_MODE_VERTICAL):
+        return mode
+    return COLOR_MODE_ENDPOINT
 
 def load_config():
     global config
@@ -55,6 +286,7 @@ def load_config():
     for k, v in DEFAULT_CONFIG.items():
         if k not in config:
             config[k] = v
+    config["color_mode"] = normalize_color_mode(config.get("color_mode"))
 
 def save_config():
     try:
@@ -91,7 +323,7 @@ def create_settings_window():
 
     tk_root = tk.Toplevel(tk_main_root)
     tk_root.title("Ring Spectrum - 设置")
-    tk_root.geometry("400x850")
+    tk_root.geometry("400x880")
     tk_root.attributes("-topmost", True)
     tk_root.attributes("-toolwindow", True)
     
@@ -339,6 +571,7 @@ def create_settings_window():
 
     spectrum_flip = tk.BooleanVar(value=bool(config.get("spectrum_flip", False)))
     spectrum_rotate_90 = tk.BooleanVar(value=bool(config.get("spectrum_rotate_90", False)))
+    spectrum_root_fade = tk.BooleanVar(value=bool(config.get("spectrum_root_fade", False)))
 
     def on_flip_change():
         config["spectrum_flip"] = bool(spectrum_flip.get())
@@ -346,10 +579,14 @@ def create_settings_window():
     def on_rotate_90_change():
         config["spectrum_rotate_90"] = bool(spectrum_rotate_90.get())
 
+    def on_root_fade_change():
+        config["spectrum_root_fade"] = bool(spectrum_root_fade.get())
+
     transform_frame = ttk.Frame(tk_root)
     transform_frame.pack(pady=(5,0))
     ttk.Checkbutton(transform_frame, text="频谱翻转", variable=spectrum_flip, command=on_flip_change).pack(side='left', padx=10)
     ttk.Checkbutton(transform_frame, text="旋转90°", variable=spectrum_rotate_90, command=on_rotate_90_change).pack(side='left', padx=10)
+    ttk.Checkbutton(transform_frame, text="根部渐隐", variable=spectrum_root_fade, command=on_root_fade_change).pack(side='left', padx=10)
 
     def get_overlay_options():
         opts = ["【默认】桌面底层", "【全局】始终置顶"]
@@ -379,15 +616,15 @@ def create_settings_window():
     overlay_var.trace_add("write", on_overlay_change)
 
     ttk.Label(tk_root, text="衰减速度 (Decay):").pack()
-    ttk.Scale(tk_root, from_=0.1, to=0.9, variable=decay_var, command=gui_update).pack(fill='x', padx=20)
+    ttk.Scale(tk_root, from_=0.01, to=0.99, variable=decay_var, command=gui_update).pack(fill='x', padx=20)
 
-    color_mode = tk.StringVar(value=config.get("color_mode", "gradient"))
+    color_mode = tk.StringVar(value=normalize_color_mode(config.get("color_mode")))
 
     def choose_start_color():
         color = colorchooser.askcolor(initialcolor=tuple(config["start_color"]), title="选择起始/纯色")
         if color[0]:
             config["start_color"] = [int(c) for c in color[0]]
-            if color_mode.get() == "solid":
+            if color_mode.get() == COLOR_MODE_SOLID:
                 config["end_color"] = config["start_color"].copy()
 
     def choose_end_color():
@@ -397,17 +634,18 @@ def create_settings_window():
 
     def on_mode_change():
         config["color_mode"] = color_mode.get()
-        if config["color_mode"] == "solid":
+        if config["color_mode"] == COLOR_MODE_SOLID:
             config["end_color"] = config["start_color"].copy()
 
     ttk.Label(tk_root, text="颜色模式 (Color Mode):").pack(pady=(10,0))
     frame_mode = ttk.Frame(tk_root)
     frame_mode.pack()
-    ttk.Radiobutton(frame_mode, text="渐变", variable=color_mode, value="gradient", command=on_mode_change).pack(side='left', padx=10)
-    ttk.Radiobutton(frame_mode, text="纯色", variable=color_mode, value="solid", command=on_mode_change).pack(side='left', padx=10)
+    ttk.Radiobutton(frame_mode, text="首尾渐变", variable=color_mode, value=COLOR_MODE_ENDPOINT, command=on_mode_change).pack(side='left', padx=6)
+    ttk.Radiobutton(frame_mode, text="上下渐变", variable=color_mode, value=COLOR_MODE_VERTICAL, command=on_mode_change).pack(side='left', padx=6)
+    ttk.Radiobutton(frame_mode, text="纯色", variable=color_mode, value=COLOR_MODE_SOLID, command=on_mode_change).pack(side='left', padx=6)
 
     ttk.Button(tk_root, text="选择起始颜色 / 纯色", command=choose_start_color).pack(pady=5)
-    ttk.Button(tk_root, text="选择结束颜色 (仅渐变)", command=choose_end_color).pack(pady=5)
+    ttk.Button(tk_root, text="选择结束颜色 (渐变模式)", command=choose_end_color).pack(pady=5)
 
     def do_save():
         save_config()
@@ -488,14 +726,54 @@ except Exception as e:
 # ---- Pygame 主循环 ----
 os.environ['SDL_VIDEO_WINDOW_POS'] = f"{config['x']},{config['y']}"
 pygame.init()
+COLOR_KEY = (255, 0, 128)
+VERTICAL_COLOR_KEY = (0, 0, 0)
 
-def set_window_layering(hwnd, color_key, alpha):
+def apply_window_ex_style(hwnd, ex_style):
+    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style)
+    win32gui.SetWindowPos(
+        hwnd,
+        0,
+        0,
+        0,
+        0,
+        0,
+        win32con.SWP_NOMOVE
+        | win32con.SWP_NOSIZE
+        | win32con.SWP_NOZORDER
+        | win32con.SWP_NOACTIVATE
+        | win32con.SWP_FRAMECHANGED
+    )
+
+def show_window_no_activate(hwnd):
+    win32gui.ShowWindow(hwnd, win32con.SW_SHOWNOACTIVATE)
+
+
+def set_window_layering(hwnd, use_per_pixel_alpha, alpha_percent, color_key, hide_during_reset=False):
     ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
     # WS_EX_TRANSPARENT 使得鼠标点击穿透，不再处理 Pygame 的鼠标事件
     # 移除强制的 WS_EX_TOPMOST，交给主循环的 Z-order 逻辑动态处理
-    new_style = (ex_style | win32con.WS_EX_LAYERED | win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_TRANSPARENT) & ~win32con.WS_EX_TOPMOST
-    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, new_style)
-    win32gui.SetLayeredWindowAttributes(hwnd, win32api.RGB(*color_key), int(255 * alpha / 100), win32con.LWA_COLORKEY | win32con.LWA_ALPHA)
+    base_style = (ex_style | win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_TRANSPARENT) & ~win32con.WS_EX_TOPMOST
+    layered_style = base_style | win32con.WS_EX_LAYERED
+    hidden_for_reset = False
+
+    if use_per_pixel_alpha and (ex_style & win32con.WS_EX_LAYERED):
+        # SetLayeredWindowAttributes 会阻止后续 UpdateLayeredWindow，
+        # 切换到逐像素 Alpha 前必须先清掉再重新设置 WS_EX_LAYERED。
+        if hide_during_reset:
+            win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+            hidden_for_reset = True
+        apply_window_ex_style(hwnd, base_style & ~win32con.WS_EX_LAYERED)
+
+    apply_window_ex_style(hwnd, layered_style)
+    if not use_per_pixel_alpha:
+        win32gui.SetLayeredWindowAttributes(
+            hwnd,
+            win32api.RGB(*color_key),
+            int(255 * max(0, min(100, int(alpha_percent))) / 100),
+            win32con.LWA_COLORKEY | win32con.LWA_ALPHA
+        )
+    return hidden_for_reset
 
 def update_window_pos(hwnd, x, y, width, height):
     # 使用 SWP_NOZORDER 保持当前的层级，不覆盖上面计算的Z-order
@@ -503,22 +781,208 @@ def update_window_pos(hwnd, x, y, width, height):
 
 screen = pygame.display.set_mode((config["width"], config["height"]), pygame.NOFRAME)
 hwnd = pygame.display.get_wm_info()["window"]
-COLOR_KEY = (255, 0, 128)
-set_window_layering(hwnd, COLOR_KEY, config["alpha"])
+canvas = pygame.Surface((config["width"], config["height"]), pygame.SRCALPHA)
+vertical_gradient_surface = pygame.Surface((config["width"], config["height"]))
+layered_bitmap = LayeredWindowBitmap()
+using_per_pixel_alpha = bool(config.get("spectrum_root_fade", False))
+initial_vertical_gradient = normalize_color_mode(config.get("color_mode")) == COLOR_MODE_VERTICAL
+active_color_key = VERTICAL_COLOR_KEY if initial_vertical_gradient and not using_per_pixel_alpha else COLOR_KEY
+set_window_layering(hwnd, using_per_pixel_alpha, config["alpha"], active_color_key)
 
 clock = pygame.time.Clock()
 
-def get_spectrum_color(index, total):
+def lerp_color(start_color, end_color, ratio):
+    ratio = max(0.0, min(1.0, float(ratio)))
+    return (
+        int(start_color[0] + (end_color[0] - start_color[0]) * ratio),
+        int(start_color[1] + (end_color[1] - start_color[1]) * ratio),
+        int(start_color[2] + (end_color[2] - start_color[2]) * ratio)
+    )
+
+
+def get_spectrum_color(index, total, seamless=False):
     sc = config["start_color"]
     ec = config["end_color"]
-    ratio = index / max(1, total - 1)
-    r = int(sc[0] + (ec[0] - sc[0]) * ratio)
-    g = int(sc[1] + (ec[1] - sc[1]) * ratio)
-    b = int(sc[2] + (ec[2] - sc[2]) * ratio)
-    return (r, g, b)
+    if normalize_color_mode(config.get("color_mode")) != COLOR_MODE_ENDPOINT:
+        return (int(sc[0]), int(sc[1]), int(sc[2]))
+
+    if seamless:
+        angle = 2 * math.pi * (index / max(1, total))
+        ratio = (1 - math.cos(angle)) / 2
+    else:
+        ratio = index / max(1, total - 1)
+
+    return lerp_color(sc, ec, ratio)
+
+def get_alpha_color(color, alpha):
+    alpha = max(0, min(255, int(alpha)))
+    return (
+        int(color[0]),
+        int(color[1]),
+        int(color[2]),
+        alpha
+    )
+
+root_fade_mask_key = None
+root_fade_mask = None
+
+
+def make_root_fade_mask(distance_from_root, max_length):
+    max_length = max(1.0, float(max_length))
+    level_size = max(1.0, max_length / ROOT_FADE_LEVELS)
+    levels = np.floor(np.clip(distance_from_root, 0, max_length) / level_size).astype(np.uint16)
+    np.minimum(levels, ROOT_FADE_LEVELS - 1, out=levels)
+    return ((levels * 255) // max(1, ROOT_FADE_LEVELS - 1)).astype(np.uint16)
+
+
+def get_root_fade_mask(width, height, style, is_flipped, is_rotated, max_length, baseline=None, center=None, radius_base=None):
+    global root_fade_mask_key, root_fade_mask
+    key = (
+        int(width),
+        int(height),
+        style,
+        bool(is_flipped),
+        bool(is_rotated),
+        round(float(max_length), 3),
+        None if baseline is None else round(float(baseline), 3),
+        None if center is None else (round(float(center[0]), 3), round(float(center[1]), 3)),
+        None if radius_base is None else round(float(radius_base), 3),
+    )
+    if key == root_fade_mask_key and root_fade_mask is not None:
+        return root_fade_mask
+
+    if style == "bar":
+        if is_rotated:
+            x_distance = np.abs(np.arange(width, dtype=np.float32) - float(baseline))
+            mask = make_root_fade_mask(x_distance[np.newaxis, :], max_length)
+        else:
+            y_distance = np.abs(np.arange(height, dtype=np.float32) - float(baseline))
+            mask = make_root_fade_mask(y_distance[:, np.newaxis], max_length)
+    else:
+        cx, cy = center
+        x = np.arange(width, dtype=np.float32)[np.newaxis, :] - float(cx)
+        y = np.arange(height, dtype=np.float32)[:, np.newaxis] - float(cy)
+        radius = np.sqrt(x * x + y * y)
+        if is_flipped:
+            distance = float(radius_base) - radius
+        else:
+            distance = radius - float(radius_base)
+        mask = make_root_fade_mask(distance, max_length)
+
+    root_fade_mask_key = key
+    root_fade_mask = mask
+    return root_fade_mask
+
+
+vertical_color_mask_key = None
+vertical_color_mask = None
+vertical_gradient_surface_key = None
+
+
+def make_vertical_color_mask(distance_from_root, max_length):
+    max_length = max(1.0, float(max_length))
+    ratio = np.clip(distance_from_root, 0, max_length) / max_length
+    sc = np.array(config["start_color"], dtype=np.float32)
+    ec = np.array(config["end_color"], dtype=np.float32)
+    mask = sc + (ec - sc) * ratio[:, :, None]
+    return mask.astype(np.uint8)
+
+
+def get_vertical_color_mask(width, height, style, is_flipped, is_rotated, max_length, baseline=None, center=None, radius_base=None):
+    global vertical_color_mask_key, vertical_color_mask
+    key = (
+        int(width),
+        int(height),
+        style,
+        bool(is_flipped),
+        bool(is_rotated),
+        round(float(max_length), 3),
+        tuple(int(c) for c in config["start_color"]),
+        tuple(int(c) for c in config["end_color"]),
+        None if baseline is None else round(float(baseline), 3),
+        None if center is None else (round(float(center[0]), 3), round(float(center[1]), 3)),
+        None if radius_base is None else round(float(radius_base), 3),
+    )
+    if key == vertical_color_mask_key and vertical_color_mask is not None:
+        return vertical_color_mask
+
+    if style == "bar":
+        if is_rotated:
+            distance = np.abs(np.arange(width, dtype=np.float32) - float(baseline))
+            distance = np.broadcast_to(distance[np.newaxis, :], (height, width))
+        else:
+            distance = np.abs(np.arange(height, dtype=np.float32) - float(baseline))
+            distance = np.broadcast_to(distance[:, np.newaxis], (height, width))
+    else:
+        cx, cy = center
+        x = np.arange(width, dtype=np.float32)[np.newaxis, :] - float(cx)
+        y = np.arange(height, dtype=np.float32)[:, np.newaxis] - float(cy)
+        radius = np.sqrt(x * x + y * y)
+        if is_flipped:
+            distance = float(radius_base) - radius
+        else:
+            distance = radius - float(radius_base)
+
+    vertical_color_mask_key = key
+    vertical_color_mask = make_vertical_color_mask(distance, max_length)
+    return vertical_color_mask
+
+
+def update_vertical_gradient_surface(surface, color_mask):
+    width, height = surface.get_size()
+    if color_mask.shape[:2] != (height, width):
+        return
+    rgb = pygame.surfarray.pixels3d(surface)
+    try:
+        target = np.transpose(rgb, (1, 0, 2))
+        np.copyto(target, color_mask)
+        # RGB 色键画布以纯黑作为透明色，避免纯黑渐变柱也被当作背景。
+        target[np.all(target == 0, axis=2)] = 1
+    finally:
+        del rgb
+
+
+def get_vertical_gradient_surface(color_mask, width, height, style, is_flipped, is_rotated, max_length, baseline=None, center=None, radius_base=None):
+    global vertical_gradient_surface, vertical_gradient_surface_key
+    key = (
+        int(width),
+        int(height),
+        style,
+        bool(is_flipped),
+        bool(is_rotated),
+        round(float(max_length), 3),
+        tuple(int(c) for c in config["start_color"]),
+        tuple(int(c) for c in config["end_color"]),
+        None if baseline is None else round(float(baseline), 3),
+        None if center is None else (round(float(center[0]), 3), round(float(center[1]), 3)),
+        None if radius_base is None else round(float(radius_base), 3),
+    )
+    if key != vertical_gradient_surface_key or vertical_gradient_surface.get_size() != (width, height):
+        vertical_gradient_surface = pygame.Surface((width, height))
+        update_vertical_gradient_surface(vertical_gradient_surface, color_mask)
+        vertical_gradient_surface_key = key
+    return vertical_gradient_surface
+
+
+def draw_spectrum_bar(surface, root_pos, tip_pos, color, bar_width, full_alpha):
+    draw_color = get_alpha_color(color, full_alpha)
+    pygame.draw.line(surface, draw_color, root_pos, tip_pos, bar_width)
+    if bar_width > 2:
+        pygame.draw.circle(
+            surface,
+            draw_color,
+            (int(round(tip_pos[0])), int(round(tip_pos[1]))),
+            max(1, bar_width // 2)
+        )
 
 while running:
     frame_count += 1
+    root_fade = bool(config.get("spectrum_root_fade", False))
+    color_mode_value = normalize_color_mode(config.get("color_mode"))
+    use_vertical_gradient = color_mode_value == COLOR_MODE_VERTICAL
+    desired_color_key = VERTICAL_COLOR_KEY if use_vertical_gradient and not root_fade else COLOR_KEY
+    show_after_layered_update = False
+    show_after_colorkey_update = False
     if frame_count % 15 == 0 or force_z_update:
         force_z_update = False
         target = config.get("overlay_target", "【默认】桌面底层")
@@ -548,12 +1012,43 @@ while running:
 
     if need_resize:
         screen = pygame.display.set_mode((config["width"], config["height"]), pygame.NOFRAME)
-        set_window_layering(hwnd, COLOR_KEY, config["alpha"])
+        hwnd = pygame.display.get_wm_info()["window"]
+        canvas = pygame.Surface((config["width"], config["height"]), pygame.SRCALPHA)
+        vertical_gradient_surface = pygame.Surface((config["width"], config["height"]))
+        vertical_gradient_surface_key = None
+        set_window_layering(hwnd, root_fade, config["alpha"], desired_color_key)
+        active_color_key = desired_color_key
+        using_per_pixel_alpha = root_fade
         update_window_pos(hwnd, config["x"], config["y"], config["width"], config["height"])
         need_resize = False
     elif need_alpha:
-        set_window_layering(hwnd, COLOR_KEY, config["alpha"])
+        if not root_fade:
+            set_window_layering(hwnd, False, config["alpha"], desired_color_key)
+            active_color_key = desired_color_key
         need_alpha = False
+
+    if using_per_pixel_alpha != root_fade:
+        hidden_for_reset = set_window_layering(
+            hwnd,
+            root_fade,
+            config["alpha"],
+            desired_color_key,
+            hide_during_reset=root_fade
+        )
+        using_per_pixel_alpha = root_fade
+        active_color_key = desired_color_key
+        if root_fade:
+            if hidden_for_reset:
+                show_after_layered_update = True
+        else:
+            screen.fill(desired_color_key)
+            pygame.display.update()
+    elif not root_fade and active_color_key != desired_color_key:
+        # 切换上下渐变时隐藏旧色键帧，避免背景色短暂闪现。
+        win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+        set_window_layering(hwnd, False, config["alpha"], desired_color_key)
+        active_color_key = desired_color_key
+        show_after_colorkey_update = True
 
     for event in pygame.event.get():
         pass # 完全通过托盘和面板交互，忽略 pygame 事件
@@ -583,12 +1078,25 @@ while running:
     current_bars = gaussian_filter1d(current_bars, sigma=1.0, mode='wrap')
     smoothed_fft = np.maximum(current_bars, smoothed_fft * config["decay"])
 
-    screen.fill(COLOR_KEY)
+    if root_fade:
+        draw_surface = canvas
+        draw_surface.fill((0, 0, 0, 0))
+    elif use_vertical_gradient:
+        draw_surface = screen
+        draw_surface.fill(VERTICAL_COLOR_KEY)
+    else:
+        draw_surface = screen
+        draw_surface.fill(COLOR_KEY)
     
     width, height = config["width"], config["height"]
     style = config.get("spectrum_style", "ring")
     is_flipped = bool(config.get("spectrum_flip", False))
     is_rotated = bool(config.get("spectrum_rotate_90", False))
+    full_alpha = int(255 * max(0, min(100, int(config["alpha"]))) / 100)
+    draw_alpha = full_alpha if root_fade else 255
+    fade_mask = None
+    color_mask = None
+    gradient_surface = None
 
     if style == "bar":
         bar_height_ratio = max(0.05, min(2.0, float(config.get("bar_height", 100.0)) / 100.0))
@@ -603,6 +1111,37 @@ while running:
             axis_start = (height - axis_span) / 2
             slot_height = max(1, axis_span) / bars
             bar_width = max(1, int(slot_height * 0.72))
+            if root_fade:
+                fade_mask = get_root_fade_mask(
+                    width,
+                    height,
+                    style,
+                    is_flipped,
+                    is_rotated,
+                    max_len,
+                    baseline=baseline
+                )
+            if use_vertical_gradient:
+                color_mask = get_vertical_color_mask(
+                    width,
+                    height,
+                    style,
+                    is_flipped,
+                    is_rotated,
+                    max_len,
+                    baseline=baseline
+                )
+                if not root_fade:
+                    gradient_surface = get_vertical_gradient_surface(
+                        color_mask,
+                        width,
+                        height,
+                        style,
+                        is_flipped,
+                        is_rotated,
+                        max_len,
+                        baseline=baseline
+                    )
 
             for i in range(bars):
                 length = smoothed_fft[i]
@@ -613,11 +1152,9 @@ while running:
                 length = min(length * bar_height_ratio, max_len)
                 y = axis_start + slot_height * i + slot_height / 2
                 x_end = baseline - length if is_flipped else baseline + length
-                color = get_spectrum_color(i, bars)
+                color = (255, 255, 255) if use_vertical_gradient else get_spectrum_color(i, bars)
 
-                pygame.draw.line(screen, color, (baseline, y), (x_end, y), bar_width)
-                if bar_width > 2:
-                    pygame.draw.circle(screen, color, (int(x_end), int(y)), bar_width // 2)
+                draw_spectrum_bar(draw_surface, (baseline, y), (x_end, y), color, bar_width, draw_alpha)
         else:
             margin_x = max(8, width * 0.03)
             edge_padding = max(8, height * 0.06)
@@ -627,6 +1164,37 @@ while running:
             axis_start = (width - axis_span) / 2
             slot_width = max(1, axis_span) / bars
             bar_width = max(1, int(slot_width * 0.72))
+            if root_fade:
+                fade_mask = get_root_fade_mask(
+                    width,
+                    height,
+                    style,
+                    is_flipped,
+                    is_rotated,
+                    max_len,
+                    baseline=baseline
+                )
+            if use_vertical_gradient:
+                color_mask = get_vertical_color_mask(
+                    width,
+                    height,
+                    style,
+                    is_flipped,
+                    is_rotated,
+                    max_len,
+                    baseline=baseline
+                )
+                if not root_fade:
+                    gradient_surface = get_vertical_gradient_surface(
+                        color_mask,
+                        width,
+                        height,
+                        style,
+                        is_flipped,
+                        is_rotated,
+                        max_len,
+                        baseline=baseline
+                    )
 
             for i in range(bars):
                 length = smoothed_fft[i]
@@ -637,11 +1205,9 @@ while running:
                 length = min(length * bar_height_ratio, max_len)
                 x = axis_start + slot_width * i + slot_width / 2
                 y_end = baseline + length if is_flipped else baseline - length
-                color = get_spectrum_color(i, bars)
+                color = (255, 255, 255) if use_vertical_gradient else get_spectrum_color(i, bars)
 
-                pygame.draw.line(screen, color, (x, baseline), (x, y_end), bar_width)
-                if bar_width > 2:
-                    pygame.draw.circle(screen, color, (int(x), int(y_end)), bar_width // 2)
+                draw_spectrum_bar(draw_surface, (x, baseline), (x, y_end), color, bar_width, draw_alpha)
     else:
         center = (width // 2, height // 2)
         radius_outer = min(width, height) / 2
@@ -650,6 +1216,40 @@ while running:
         ring_size = radius_outer - radius_inner
         angle_offset = np.pi / 2 if is_rotated else 0
         max_len = max(1, ring_size)
+        if root_fade:
+            fade_mask = get_root_fade_mask(
+                width,
+                height,
+                style,
+                is_flipped,
+                is_rotated,
+                max_len,
+                center=center,
+                radius_base=radius_base
+            )
+        if use_vertical_gradient:
+            color_mask = get_vertical_color_mask(
+                width,
+                height,
+                style,
+                is_flipped,
+                is_rotated,
+                max_len,
+                center=center,
+                radius_base=radius_base
+            )
+            if not root_fade:
+                gradient_surface = get_vertical_gradient_surface(
+                    color_mask,
+                    width,
+                    height,
+                    style,
+                    is_flipped,
+                    is_rotated,
+                    max_len,
+                    center=center,
+                    radius_base=radius_base
+                )
 
         for i in range(bars):
             angle = i * (2 * np.pi / bars) - np.pi / 2 + angle_offset
@@ -666,14 +1266,25 @@ while running:
             
             end_x = center[0] + end_radius * np.cos(angle)
             end_y = center[1] + end_radius * np.sin(angle)
-            color = get_spectrum_color(i, bars)
+            color = (255, 255, 255) if use_vertical_gradient else get_spectrum_color(i, bars, seamless=True)
             
             bar_width = max(1, int((2 * np.pi * radius_inner / bars) * 0.8))
-            pygame.draw.line(screen, color, (start_x, start_y), (end_x, end_y), bar_width)
-            if bar_width > 2:
-                pygame.draw.circle(screen, color, (int(end_x), int(end_y)), bar_width // 2)
+            draw_spectrum_bar(draw_surface, (start_x, start_y), (end_x, end_y), color, bar_width, draw_alpha)
 
-    pygame.display.flip()
+    if root_fade:
+        layered_bitmap.update(hwnd, canvas, config["x"], config["y"], fade_mask, color_mask)
+        if show_after_layered_update:
+            show_window_no_activate(hwnd)
+            force_z_update = True
+    elif use_vertical_gradient:
+        # 黑色背景乘以任何渐变色后仍是透明色键，因此可直接在显示 Surface 上混合。
+        screen.blit(gradient_surface, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
+        pygame.display.update()
+    else:
+        pygame.display.update()
+    if show_after_colorkey_update:
+        show_window_no_activate(hwnd)
+        force_z_update = True
     clock.tick(60)
 
 save_config()
@@ -681,6 +1292,7 @@ if 'stream' in globals():
     stream.stop_stream()
     stream.close()
 p.terminate()
+layered_bitmap.close()
 try:
     tk_main_root.destroy()
 except:

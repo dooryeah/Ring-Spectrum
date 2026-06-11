@@ -1,22 +1,28 @@
 {
-    "width": 484,
-    "height": 484,
-    "x": -92,
-    "y": 858,
-    "alpha": 25,
-    "sensitivity": 1.9176300578034682,
+    "width": 1500,
+    "height": 1500,
+    "x": 274,
+    "y": -110,
+    "alpha": 100,
+    "sensitivity": 5.0,
     "start_color": [
-        136,
-        255,
-        255
+        254,
+        190,
+        241
     ],
     "end_color": [
-        255,
-        155,
-        255
+        220,
+        126,
+        237
     ],
     "bars": 240,
-    "decay": 0.9,
+    "decay": 0.8738728323699422,
     "color_mode": "gradient",
-    "overlay_target": "Dooryeah730 on \u55b5\u5bbf"
+    "spectrum_style": "ring",
+    "spectrum_flip": false,
+    "spectrum_rotate_90": false,
+    "spectrum_root_fade": false,
+    "bar_height": 113.78612716763006,
+    "bar_length": 90.89595375722543,
+    "overlay_target": "Audio Visualization"
 }
