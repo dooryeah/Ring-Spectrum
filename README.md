@@ -2,7 +2,6 @@ Ring Spectrum - 环形音乐频谱
 当前版本：v0.4.0
 
 启动与交互：
-- 正式发布包建议从 GitHub Releases 下载；源码仓库保留代码和文档，exe / zip 发布产物放在 Release 附件中。
 - 双击 RingSpectrum.exe 启动程序。
 - 程序启动后不会出现任何主窗口或任务栏图标，而是在系统托盘区（右下角）出现一个青色圆形小图标。
 - 【右键点击托盘图标】，在弹出的菜单中选择“设置”打开调参窗口，在该窗口中，选择“保存配置”则保存配置于 config.json 中，点击“关闭面板”则关闭当前设置窗口。
@@ -38,9 +37,5 @@ Ring Spectrum - 环形音乐频谱
 - RingSpectrum_v0.4.0_Delivery.zip 为当前版本发布包，包含 RingSpectrum.exe、config.json、USER_GUIDE.txt 和 CHANGELOG.txt。
 - CHANGELOG.txt 记录各版本主要变化。
 
-维护者发布：
-- 本地运行 `.\build_release.ps1 -Version 0.4.0` 可生成版本化发布包和兼容旧名称的发布包。
-- 推送 `v0.4.0` 这类 Git 标签后，GitHub Actions 会自动构建 Windows 版本并创建 GitHub Release。
-- 发布前同步修改 main.py 中的 APP_VERSION、本文档版本号和 CHANGELOG.txt。
 
 THANK U FOR READING <3
