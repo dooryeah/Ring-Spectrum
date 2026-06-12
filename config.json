@@ -3,26 +3,147 @@
     "height": 1500,
     "x": 274,
     "y": -110,
-    "alpha": 100,
+    "alpha": 20,
     "sensitivity": 5.0,
     "start_color": [
-        254,
-        190,
-        241
+        0,
+        128,
+        255
     ],
     "end_color": [
-        220,
-        126,
-        237
+        249,
+        149,
+        247
     ],
     "bars": 240,
-    "decay": 0.8738728323699422,
+    "decay": 0.6246242774566474,
     "color_mode": "gradient",
+    "sp_mode": "beat",
     "spectrum_style": "ring",
     "spectrum_flip": false,
     "spectrum_rotate_90": false,
-    "spectrum_root_fade": false,
-    "bar_height": 113.78612716763006,
-    "bar_length": 90.89595375722543,
-    "overlay_target": "Audio Visualization"
+    "spectrum_root_fade": true,
+    "bar_height": 34.16184971098266,
+    "bar_length": 100.0,
+    "overlay_target": "【默认】桌面底层",
+    "performance_mode": "quality",
+    "active_preset": "阿洛娜",
+    "presets": {
+        "底部平铺": {
+            "width": 1500,
+            "height": 1500,
+            "x": 274,
+            "y": 525,
+            "alpha": 62,
+            "sensitivity": 5.0,
+            "start_color": [
+                77,
+                186,
+                238
+            ],
+            "end_color": [
+                244,
+                172,
+                236
+            ],
+            "bars": 102,
+            "decay": 0.8908670520231213,
+            "color_mode": "gradient",
+            "sp_mode": "normal",
+            "spectrum_style": "bar",
+            "spectrum_flip": false,
+            "spectrum_rotate_90": false,
+            "spectrum_root_fade": false,
+            "bar_height": 34.16184971098266,
+            "bar_length": 100.0,
+            "overlay_target": "⠧ Audio Visualization"
+        },
+        "叶隐琉璃": {
+            "width": 1500,
+            "height": 1500,
+            "x": 274,
+            "y": -110,
+            "alpha": 99,
+            "sensitivity": 5.0,
+            "start_color": [
+                253,
+                220,
+                254
+            ],
+            "end_color": [
+                244,
+                172,
+                236
+            ],
+            "bars": 226,
+            "decay": 0.8908670520231213,
+            "color_mode": "gradient",
+            "sp_mode": "beat",
+            "spectrum_style": "ring",
+            "spectrum_flip": false,
+            "spectrum_rotate_90": false,
+            "spectrum_root_fade": true,
+            "bar_height": 34.16184971098266,
+            "bar_length": 100.0,
+            "overlay_target": "【默认】桌面底层"
+        },
+        "Fubuki": {
+            "width": 1500,
+            "height": 1500,
+            "x": 274,
+            "y": -110,
+            "alpha": 51,
+            "sensitivity": 5.0,
+            "start_color": [
+                255,
+                255,
+                255
+            ],
+            "end_color": [
+                128,
+                128,
+                128
+            ],
+            "bars": 225,
+            "decay": 0.6982658959537572,
+            "color_mode": "vertical_gradient",
+            "sp_mode": "beat",
+            "spectrum_style": "ring",
+            "spectrum_flip": false,
+            "spectrum_rotate_90": false,
+            "spectrum_root_fade": true,
+            "bar_height": 34.16184971098266,
+            "bar_length": 100.0,
+            "overlay_target": "【默认】桌面底层"
+        },
+        "阿洛娜": {
+            "width": 1500,
+            "height": 1500,
+            "x": 274,
+            "y": -110,
+            "alpha": 20,
+            "sensitivity": 5.0,
+            "start_color": [
+                0,
+                128,
+                255
+            ],
+            "end_color": [
+                249,
+                149,
+                247
+            ],
+            "bars": 240,
+            "decay": 0.6246242774566474,
+            "color_mode": "gradient",
+            "sp_mode": "beat",
+            "spectrum_style": "ring",
+            "spectrum_flip": false,
+            "spectrum_rotate_90": false,
+            "spectrum_root_fade": true,
+            "bar_height": 34.16184971098266,
+            "bar_length": 100.0,
+            "overlay_target": "【默认】桌面底层"
+        }
+    }
 }

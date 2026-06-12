@@ -1,0 +1,17 @@
+Ring Spectrum Changelog
+
+v0.4.0
+- Added app version display in the settings window and tray tooltip.
+- Added preset copy, rename, import, and export actions in the settings panel.
+- Preset export files use a JSON envelope with app/version metadata and UTF-8 names.
+- Kept the active preset state stable when importing presets.
+- Documented the GitHub Releases based release flow and versioned delivery package.
+
+v0.3.0
+- Added visual presets and tray preset switching.
+- Added performance modes: power saver, balanced, and quality.
+- Added beat-reactive sp mode.
+- Optimized vertical gradient rendering and root fade rendering.
+- Reduced bundled executable size by removing SciPy.
+- Fixed root-fade visibility and draw coordinate crashes.
+- Fixed black flicker during size and position adjustments.

@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import copy
 import pygame
 import numpy as np
 import pyaudiowpatch as pyaudio
@@ -11,11 +12,11 @@ import math
 import ctypes
 from ctypes import wintypes
 import tkinter as tk
-from tkinter import ttk, colorchooser, messagebox
-from scipy.ndimage import gaussian_filter1d
+from tkinter import ttk, colorchooser, messagebox, filedialog, simpledialog
 import pystray
 from PIL import Image, ImageDraw
 import threading
+from collections import deque
 
 if getattr(sys, 'frozen', False):
     application_path = os.path.dirname(sys.executable)
@@ -23,10 +24,40 @@ else:
     application_path = os.path.dirname(os.path.abspath(__file__))
 
 CONFIG_FILE = os.path.join(application_path, "config.json")
-ROOT_FADE_LEVELS = 64
+APP_NAME = "Ring Spectrum"
+APP_VERSION = "0.4.0"
+PRESET_EXPORT_FORMAT = "ring-spectrum-presets"
+PRESET_EXPORT_VERSION = 1
+PERFORMANCE_MODE_POWER_SAVER = "power_saver"
+PERFORMANCE_MODE_BALANCED = "balanced"
+PERFORMANCE_MODE_QUALITY = "quality"
 COLOR_MODE_SOLID = "solid"
 COLOR_MODE_ENDPOINT = "gradient"
 COLOR_MODE_VERTICAL = "vertical_gradient"
+SP_MODE_NORMAL = "normal"
+SP_MODE_BEAT = "beat"
+BAR_SMOOTH_KERNEL = (1.0, 4.0, 6.0, 4.0, 1.0)
+
+PERFORMANCE_PROFILES = {
+    PERFORMANCE_MODE_POWER_SAVER: {
+        "label": "省电",
+        "fps": 30,
+        "root_fade_segments": 24,
+        "max_bars": 96
+    },
+    PERFORMANCE_MODE_BALANCED: {
+        "label": "均衡",
+        "fps": 45,
+        "root_fade_segments": 40,
+        "max_bars": 160
+    },
+    PERFORMANCE_MODE_QUALITY: {
+        "label": "高质量",
+        "fps": 120,
+        "root_fade_segments": 64,
+        "max_bars": None
+    }
+}
 
 AC_SRC_OVER = 0x00
 AC_SRC_ALPHA = 0x01
@@ -258,13 +289,25 @@ DEFAULT_CONFIG = {
     "bars": 64,
     "decay": 0.8,
     "color_mode": COLOR_MODE_ENDPOINT,
+    "sp_mode": SP_MODE_NORMAL,
     "spectrum_style": "ring",
     "spectrum_flip": False,
     "spectrum_rotate_90": False,
     "spectrum_root_fade": False,
     "bar_height": 100.0,
-    "bar_length": 100.0
+    "bar_length": 100.0,
+    "overlay_target": "【默认】桌面底层",
+    "performance_mode": PERFORMANCE_MODE_BALANCED
 }
+
+PRESET_CONFIG_KEYS = tuple(
+    key for key in DEFAULT_CONFIG.keys()
+    if key not in ("performance_mode",)
+)
+DEFAULT_CONFIG.update({
+    "active_preset": "",
+    "presets": {}
+})
 
 config = {}
 
@@ -273,57 +316,387 @@ def normalize_color_mode(mode):
         return mode
     return COLOR_MODE_ENDPOINT
 
+def normalize_sp_mode(mode):
+    if mode == SP_MODE_BEAT:
+        return SP_MODE_BEAT
+    return SP_MODE_NORMAL
+
+def normalize_performance_mode(mode):
+    if mode in PERFORMANCE_PROFILES:
+        return mode
+    return PERFORMANCE_MODE_BALANCED
+
+def normalize_preset_name(name):
+    if name is None:
+        return ""
+    return " ".join(str(name).strip().split())
+
+def normalize_bar_count(value):
+    try:
+        return max(1, int(value))
+    except Exception:
+        return int(DEFAULT_CONFIG["bars"])
+
+def normalize_color_value(value, fallback):
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        value = fallback
+    normalized = []
+    for channel in value[:3]:
+        try:
+            normalized.append(max(0, min(255, int(channel))))
+        except Exception:
+            normalized.append(0)
+    return normalized
+
+def normalize_config_values(values):
+    values["color_mode"] = normalize_color_mode(values.get("color_mode"))
+    values["sp_mode"] = normalize_sp_mode(values.get("sp_mode"))
+    if "performance_mode" in values:
+        values["performance_mode"] = normalize_performance_mode(values.get("performance_mode"))
+    values["bars"] = normalize_bar_count(values.get("bars"))
+    values["start_color"] = normalize_color_value(values.get("start_color"), DEFAULT_CONFIG["start_color"])
+    values["end_color"] = normalize_color_value(values.get("end_color"), DEFAULT_CONFIG["end_color"])
+    return values
+
+def preset_snapshot_from(source, fallback=None):
+    source = source if isinstance(source, dict) else {}
+    fallback = fallback if isinstance(fallback, dict) else DEFAULT_CONFIG
+    snapshot = {}
+    for key in PRESET_CONFIG_KEYS:
+        if key in source:
+            snapshot[key] = copy.deepcopy(source[key])
+        else:
+            snapshot[key] = copy.deepcopy(fallback[key])
+    return normalize_config_values(snapshot)
+
+def normalize_presets():
+    presets = config.get("presets")
+    if not isinstance(presets, dict):
+        presets = {}
+
+    cleaned = {}
+    for name, preset in presets.items():
+        preset_name = normalize_preset_name(name)
+        if preset_name and isinstance(preset, dict):
+            cleaned[preset_name] = preset_snapshot_from(preset)
+
+    config["presets"] = cleaned
+    active_preset = normalize_preset_name(config.get("active_preset", ""))
+    config["active_preset"] = active_preset if active_preset in cleaned else ""
+
+def make_unique_preset_name(base_name):
+    base_name = normalize_preset_name(base_name) or "未命名预设"
+    presets = config.get("presets", {})
+    if base_name not in presets:
+        return base_name
+
+    index = 2
+    while True:
+        candidate = f"{base_name} {index}"
+        if candidate not in presets:
+            return candidate
+        index += 1
+
+def normalize_config():
+    for key, value in DEFAULT_CONFIG.items():
+        if key not in config:
+            config[key] = copy.deepcopy(value)
+    normalize_config_values(config)
+    normalize_presets()
+
 def load_config():
     global config
+    loaded_config = {}
     if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG_FILE, "r") as f:
-                config.update(json.load(f))
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                loaded_config = json.load(f)
+                if not isinstance(loaded_config, dict):
+                    loaded_config = {}
         except Exception:
-            config = DEFAULT_CONFIG.copy()
-    else:
-        config = DEFAULT_CONFIG.copy()
-    for k, v in DEFAULT_CONFIG.items():
-        if k not in config:
-            config[k] = v
-    config["color_mode"] = normalize_color_mode(config.get("color_mode"))
+            loaded_config = {}
+
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    config.update(loaded_config)
+    normalize_config()
 
 def save_config():
     try:
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config, f, indent=4)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
     except Exception:
         pass
+
+def read_json_file(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def write_json_file(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 load_config()
 
 # 标志位
 running = True
 need_resize = False
+need_move = False
 need_alpha = False
 show_settings_flag = False
+pending_preset_name = None
 force_z_update = True
 frame_count = 0
-smoothed_fft = np.zeros(config["bars"])
+smoothed_fft = np.zeros(config["bars"], dtype=np.float32)
+last_use_vertical_gradient = normalize_color_mode(config.get("color_mode")) == COLOR_MODE_VERTICAL
+last_root_fade = bool(config.get("spectrum_root_fade", False))
+beat_energy_history = deque(maxlen=72)
+beat_previous_energy = 0.0
+beat_last_frame = -9999
+beat_pulse = 0.0
+beat_flash = 0.0
 
 
 # ---- Tkinter 调参窗口 ----
 tk_main_root = tk.Tk()
 tk_main_root.withdraw()
 tk_root = None
+settings_refresh_callback = None
+
+def refresh_settings_controls():
+    if settings_refresh_callback is not None:
+        try:
+            settings_refresh_callback()
+        except Exception:
+            pass
+
+def update_tray_menu():
+    try:
+        icon.update_menu()
+    except Exception:
+        pass
+
+def apply_config_snapshot(snapshot, active_preset=""):
+    global need_resize, need_move, need_alpha, smoothed_fft, force_z_update
+
+    snapshot = preset_snapshot_from(snapshot, config)
+    old_pos = (int(config["x"]), int(config["y"]))
+    old_size = (int(config["width"]), int(config["height"]))
+    old_alpha = int(config["alpha"])
+    old_bars = int(config["bars"])
+    old_overlay = config.get("overlay_target")
+
+    for key, value in snapshot.items():
+        config[key] = copy.deepcopy(value)
+
+    active_preset = normalize_preset_name(active_preset)
+    config["active_preset"] = active_preset if active_preset in config.get("presets", {}) else ""
+    normalize_config()
+
+    new_pos = (int(config["x"]), int(config["y"]))
+    new_size = (int(config["width"]), int(config["height"]))
+    if new_size != old_size:
+        need_resize = True
+    elif new_pos != old_pos:
+        need_move = True
+    if int(config["alpha"]) != old_alpha:
+        need_alpha = True
+    if int(config["bars"]) != old_bars:
+        smoothed_fft = np.zeros(config["bars"], dtype=np.float32)
+    if config.get("overlay_target") != old_overlay:
+        force_z_update = True
+
+    refresh_settings_controls()
+    update_tray_menu()
+    save_config()
+
+def apply_preset(name):
+    name = normalize_preset_name(name)
+    preset = config.get("presets", {}).get(name)
+    if not preset:
+        return False
+    apply_config_snapshot(preset, active_preset=name)
+    return True
+
+def save_current_preset(name):
+    name = normalize_preset_name(name)
+    if not name:
+        return False
+    config["presets"][name] = preset_snapshot_from(config)
+    config["active_preset"] = name
+    normalize_config()
+    save_config()
+    refresh_settings_controls()
+    update_tray_menu()
+    return True
+
+def delete_preset(name):
+    name = normalize_preset_name(name)
+    if name not in config.get("presets", {}):
+        return False
+    del config["presets"][name]
+    if config.get("active_preset") == name:
+        config["active_preset"] = ""
+    save_config()
+    refresh_settings_controls()
+    update_tray_menu()
+    return True
+
+def rename_preset(old_name, new_name):
+    old_name = normalize_preset_name(old_name)
+    new_name = normalize_preset_name(new_name)
+    presets = config.get("presets", {})
+    if not old_name or old_name not in presets or not new_name or new_name in presets:
+        return False
+
+    items = list(presets.items())
+    renamed = {}
+    for name, preset in items:
+        renamed[new_name if name == old_name else name] = preset
+    config["presets"] = renamed
+    if config.get("active_preset") == old_name:
+        config["active_preset"] = new_name
+    normalize_config()
+    save_config()
+    refresh_settings_controls()
+    update_tray_menu()
+    return True
+
+def duplicate_preset(source_name, new_name=None):
+    source_name = normalize_preset_name(source_name)
+    presets = config.get("presets", {})
+    if source_name not in presets:
+        return ""
+
+    if new_name is None:
+        new_name = make_unique_preset_name(f"{source_name} 副本")
+    else:
+        new_name = normalize_preset_name(new_name)
+        if not new_name or new_name in presets:
+            return ""
+
+    presets[new_name] = preset_snapshot_from(presets[source_name])
+    if config.get("active_preset") == source_name:
+        config["active_preset"] = new_name
+    normalize_config()
+    save_config()
+    refresh_settings_controls()
+    update_tray_menu()
+    return new_name
+
+def collect_presets_from_export(data):
+    if not isinstance(data, dict):
+        return {}
+
+    if data.get("format") == PRESET_EXPORT_FORMAT and isinstance(data.get("presets"), dict):
+        source_presets = data.get("presets", {})
+    elif isinstance(data.get("presets"), dict):
+        source_presets = data.get("presets", {})
+    elif all(key in data for key in ("width", "height", "start_color", "end_color", "bars")):
+        source_presets = {normalize_preset_name(data.get("name", "导入预设")): data}
+    else:
+        source_presets = data
+
+    imported = {}
+    for name, preset in source_presets.items():
+        preset_name = normalize_preset_name(name)
+        if preset_name and isinstance(preset, dict):
+            imported[preset_name] = preset_snapshot_from(preset)
+    return imported
+
+def import_presets_from_file(path, replace_existing=False):
+    try:
+        imported = collect_presets_from_export(read_json_file(path))
+    except Exception:
+        return 0
+
+    if not imported:
+        return 0
+
+    presets = config.setdefault("presets", {})
+    active_preset = config.get("active_preset", "")
+    for name, preset in imported.items():
+        target_name = name if replace_existing else make_unique_preset_name(name)
+        presets[target_name] = preset
+
+    if replace_existing and active_preset in imported:
+        config["active_preset"] = ""
+    normalize_config()
+    save_config()
+    refresh_settings_controls()
+    update_tray_menu()
+    return len(imported)
+
+def export_presets_to_file(path, names=None):
+    presets = config.get("presets", {})
+    if names is None:
+        selected_names = list(presets.keys())
+    else:
+        selected_names = [
+            normalize_preset_name(name)
+            for name in names
+            if normalize_preset_name(name) in presets
+        ]
+
+    if not selected_names:
+        return False
+
+    payload = {
+        "format": PRESET_EXPORT_FORMAT,
+        "version": PRESET_EXPORT_VERSION,
+        "app": APP_NAME,
+        "app_version": APP_VERSION,
+        "presets": {
+            name: preset_snapshot_from(presets[name])
+            for name in selected_names
+        }
+    }
+    try:
+        write_json_file(path, payload)
+    except Exception:
+        return False
+    return True
+
+def get_performance_profile():
+    mode = normalize_performance_mode(config.get("performance_mode"))
+    if config.get("performance_mode") != mode:
+        config["performance_mode"] = mode
+    return PERFORMANCE_PROFILES[mode]
+
+def get_effective_bars():
+    bars = normalize_bar_count(config.get("bars"))
+    max_bars = get_performance_profile().get("max_bars")
+    if max_bars is None:
+        return bars
+    return min(bars, int(max_bars))
+
+def get_target_fps():
+    return int(get_performance_profile()["fps"])
+
+def get_root_fade_segments():
+    return int(get_performance_profile()["root_fade_segments"])
+
+def set_performance_mode(mode):
+    mode = normalize_performance_mode(mode)
+    if config.get("performance_mode") == mode:
+        return
+    config["performance_mode"] = mode
+    save_config()
+    update_tray_menu()
 
 def create_settings_window():
-    global tk_root, size_var, alpha_var, sens_var, bars_var, decay_var, color_mode
+    global tk_root, settings_refresh_callback
+    global size_var, alpha_var, sens_var, bars_var, decay_var, color_mode
     global x_var, y_var
     
     if tk_root is not None and tk_root.winfo_exists():
+        refresh_settings_controls()
         tk_root.deiconify()
         tk_root.lift()
         return
 
     tk_root = tk.Toplevel(tk_main_root)
-    tk_root.title("Ring Spectrum - 设置")
-    tk_root.geometry("400x880")
+    tk_root.title(f"{APP_NAME} v{APP_VERSION} - 设置")
+    tk_root.geometry("400x1000")
     tk_root.attributes("-topmost", True)
     tk_root.attributes("-toolwindow", True)
     
@@ -340,9 +713,12 @@ def create_settings_window():
     decay_var = tk.DoubleVar(value=config["decay"])
     bar_height_var = tk.DoubleVar(value=config.get("bar_height", 100.0))
     bar_length_var = tk.DoubleVar(value=config.get("bar_length", 100.0))
+    controls_refreshing = False
 
     def gui_update(*args):
-        global need_resize, need_alpha, smoothed_fft
+        global need_resize, need_move, need_alpha, smoothed_fft
+        if controls_refreshing:
+            return
         
         try:
             new_cx = int(cx_var.get())
@@ -358,12 +734,18 @@ def create_settings_window():
         expected_x = int(new_cx - new_size / 2.0)
         expected_y = int(new_cy - new_size / 2.0)
         
-        if expected_x != config["x"] or expected_y != config["y"] or new_size != config["width"]:
+        position_changed = expected_x != config["x"] or expected_y != config["y"]
+        size_changed = new_size != config["width"] or new_size != config["height"]
+
+        if position_changed:
             config["x"] = expected_x
             config["y"] = expected_y
+        if size_changed:
             config["width"] = new_size
             config["height"] = new_size
             need_resize = True
+        elif position_changed:
+            need_move = True
 
         new_alpha = int(alpha_var.get())
         if new_alpha != config["alpha"]:
@@ -375,7 +757,7 @@ def create_settings_window():
         new_bars = int(bars_var.get())
         if new_bars != config["bars"]:
             config["bars"] = new_bars
-            smoothed_fft = np.zeros(new_bars)
+            smoothed_fft = np.zeros(new_bars, dtype=np.float32)
             
         config["decay"] = float(decay_var.get())
         config["bar_height"] = float(bar_height_var.get())
@@ -609,6 +991,8 @@ def create_settings_window():
     overlay_cb.configure(postcommand=lambda: overlay_cb.configure(values=get_overlay_options()))
 
     def on_overlay_change(*args):
+        if controls_refreshing:
+            return
         config["overlay_target"] = overlay_var.get()
         global force_z_update
         force_z_update = True
@@ -617,6 +1001,24 @@ def create_settings_window():
 
     ttk.Label(tk_root, text="衰减速度 (Decay):").pack()
     ttk.Scale(tk_root, from_=0.01, to=0.99, variable=decay_var, command=gui_update).pack(fill='x', padx=20)
+
+    sp_mode_var = tk.StringVar(value=normalize_sp_mode(config.get("sp_mode")))
+
+    def on_sp_mode_change(event=None):
+        if controls_refreshing:
+            return
+        config["sp_mode"] = normalize_sp_mode(sp_mode_var.get())
+
+    ttk.Label(tk_root, text="sp模式:").pack(pady=(10, 0))
+    sp_mode_cb = ttk.Combobox(
+        tk_root,
+        textvariable=sp_mode_var,
+        values=(SP_MODE_NORMAL, SP_MODE_BEAT),
+        state="readonly",
+        width=12
+    )
+    sp_mode_cb.pack()
+    sp_mode_cb.bind("<<ComboboxSelected>>", on_sp_mode_change)
 
     color_mode = tk.StringVar(value=normalize_color_mode(config.get("color_mode")))
 
@@ -647,6 +1049,154 @@ def create_settings_window():
     ttk.Button(tk_root, text="选择起始颜色 / 纯色", command=choose_start_color).pack(pady=5)
     ttk.Button(tk_root, text="选择结束颜色 (渐变模式)", command=choose_end_color).pack(pady=5)
 
+    def get_preset_names():
+        return list(config.get("presets", {}).keys())
+
+    preset_name_var = tk.StringVar(value=config.get("active_preset", ""))
+    preset_frame = ttk.LabelFrame(tk_root, text="预设")
+    preset_frame.pack(fill='x', padx=20, pady=(10, 5))
+    preset_row = ttk.Frame(preset_frame)
+    preset_row.pack(fill='x', padx=8, pady=(8, 4))
+    ttk.Label(preset_row, text="名称:").pack(side='left')
+    preset_cb = ttk.Combobox(preset_row, textvariable=preset_name_var, values=get_preset_names(), width=24)
+    preset_cb.pack(side='left', padx=5, fill='x', expand=True)
+
+    preset_button_row = ttk.Frame(preset_frame)
+    preset_button_row.pack(fill='x', padx=8, pady=(0, 8))
+
+    def apply_selected_preset():
+        name = normalize_preset_name(preset_name_var.get())
+        if not apply_preset(name):
+            messagebox.showwarning("提示", "请选择已有预设", parent=tk_root)
+
+    def save_selected_preset():
+        name = normalize_preset_name(preset_name_var.get())
+        if not save_current_preset(name):
+            messagebox.showwarning("提示", "请输入预设名称", parent=tk_root)
+            return
+        messagebox.showinfo("成功", f"预设“{name}”已保存", parent=tk_root)
+
+    def delete_selected_preset():
+        name = normalize_preset_name(preset_name_var.get())
+        if name not in config.get("presets", {}):
+            messagebox.showwarning("提示", "请选择已有预设", parent=tk_root)
+            return
+        if messagebox.askyesno("确认", f"删除预设“{name}”？", parent=tk_root):
+            delete_preset(name)
+
+    def rename_selected_preset():
+        old_name = normalize_preset_name(preset_name_var.get())
+        if old_name not in config.get("presets", {}):
+            messagebox.showwarning("提示", "请选择已有预设", parent=tk_root)
+            return
+
+        new_name = simpledialog.askstring("重命名预设", "新名称:", initialvalue=old_name, parent=tk_root)
+        new_name = normalize_preset_name(new_name)
+        if not new_name or new_name == old_name:
+            return
+        if new_name in config.get("presets", {}):
+            messagebox.showwarning("提示", "该预设名称已存在", parent=tk_root)
+            return
+        if rename_preset(old_name, new_name):
+            preset_name_var.set(new_name)
+
+    def duplicate_selected_preset():
+        name = normalize_preset_name(preset_name_var.get())
+        if name not in config.get("presets", {}):
+            messagebox.showwarning("提示", "请选择已有预设", parent=tk_root)
+            return
+        new_name = duplicate_preset(name)
+        if new_name:
+            preset_name_var.set(new_name)
+            messagebox.showinfo("成功", f"已复制为“{new_name}”", parent=tk_root)
+
+    def import_presets():
+        path = filedialog.askopenfilename(
+            parent=tk_root,
+            title="导入预设",
+            filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")]
+        )
+        if not path:
+            return
+        replace_existing = messagebox.askyesno(
+            "导入方式",
+            "同名预设是否覆盖？\n选择“否”会自动生成新名称。",
+            parent=tk_root
+        )
+        count = import_presets_from_file(path, replace_existing=replace_existing)
+        if count:
+            messagebox.showinfo("成功", f"已导入 {count} 个预设", parent=tk_root)
+        else:
+            messagebox.showwarning("提示", "没有找到可导入的预设", parent=tk_root)
+
+    def export_presets():
+        presets = config.get("presets", {})
+        if not presets:
+            messagebox.showwarning("提示", "当前没有可导出的预设", parent=tk_root)
+            return
+        active = normalize_preset_name(preset_name_var.get())
+        suggested_name = f"{active or 'RingSpectrum'}_presets.json"
+        path = filedialog.asksaveasfilename(
+            parent=tk_root,
+            title="导出预设",
+            initialfile=suggested_name,
+            defaultextension=".json",
+            filetypes=[("JSON 文件", "*.json"), ("所有文件", "*.*")]
+        )
+        if not path:
+            return
+
+        names = None
+        if active in presets and not messagebox.askyesno("导出范围", "导出全部预设？\n选择“否”只导出当前选中的预设。", parent=tk_root):
+            names = [active]
+
+        if export_presets_to_file(path, names=names):
+            messagebox.showinfo("成功", "预设已导出", parent=tk_root)
+        else:
+            messagebox.showwarning("提示", "导出失败", parent=tk_root)
+
+    ttk.Button(preset_button_row, text="应用", command=apply_selected_preset).pack(side='left', expand=True, fill='x', padx=(0, 3))
+    ttk.Button(preset_button_row, text="保存/覆盖", command=save_selected_preset).pack(side='left', expand=True, fill='x', padx=3)
+
+    preset_manage_button = ttk.Menubutton(preset_button_row, text="管理")
+    preset_manage_menu = tk.Menu(preset_manage_button, tearoff=False)
+    preset_manage_menu.add_command(label="复制", command=duplicate_selected_preset)
+    preset_manage_menu.add_command(label="重命名", command=rename_selected_preset)
+    preset_manage_menu.add_command(label="删除", command=delete_selected_preset)
+    preset_manage_menu.add_separator()
+    preset_manage_menu.add_command(label="导入", command=import_presets)
+    preset_manage_menu.add_command(label="导出", command=export_presets)
+    preset_manage_button.configure(menu=preset_manage_menu)
+    preset_manage_button.pack(side='left', expand=True, fill='x', padx=(3, 0))
+
+    def refresh_controls_from_config():
+        nonlocal controls_refreshing
+        controls_refreshing = True
+        try:
+            size_var.set(config["width"])
+            cx_var.set(int(config["x"] + config["width"] / 2.0))
+            cy_var.set(int(config["y"] + config["height"] / 2.0))
+            alpha_var.set(config["alpha"])
+            sens_var.set(config["sensitivity"])
+            bars_var.set(config["bars"])
+            decay_var.set(config["decay"])
+            bar_height_var.set(config.get("bar_height", 100.0))
+            bar_length_var.set(config.get("bar_length", 100.0))
+            spectrum_style.set(config.get("spectrum_style", "ring"))
+            spectrum_flip.set(bool(config.get("spectrum_flip", False)))
+            spectrum_rotate_90.set(bool(config.get("spectrum_rotate_90", False)))
+            spectrum_root_fade.set(bool(config.get("spectrum_root_fade", False)))
+            overlay_var.set(config.get("overlay_target", "【默认】桌面底层"))
+            sp_mode_var.set(normalize_sp_mode(config.get("sp_mode")))
+            color_mode.set(normalize_color_mode(config.get("color_mode")))
+            preset_name_var.set(config.get("active_preset", ""))
+            preset_cb.configure(values=get_preset_names())
+            update_bar_controls_visibility()
+        finally:
+            controls_refreshing = False
+
+    settings_refresh_callback = refresh_controls_from_config
+
     def do_save():
         save_config()
         messagebox.showinfo("成功", "配置已保存", parent=tk_root)
@@ -674,8 +1224,56 @@ def on_settings(icon, item):
     global show_settings_flag
     show_settings_flag = True
 
-icon = pystray.Icon("RingSpectrum", create_image(), "环形频谱", menu=pystray.Menu(
+def make_preset_action(name):
+    def handler(icon, item):
+        global pending_preset_name
+        pending_preset_name = name
+    return handler
+
+def make_preset_checked(name):
+    def checked(item):
+        return config.get("active_preset") == name
+    return checked
+
+def build_preset_menu_items():
+    presets = config.get("presets", {})
+    if not presets:
+        return (pystray.MenuItem("暂无预设", None, enabled=False),)
+    return tuple(
+        pystray.MenuItem(
+            name,
+            make_preset_action(name),
+            checked=make_preset_checked(name),
+            radio=True
+        )
+        for name in presets.keys()
+    )
+
+def make_performance_action(mode):
+    def handler(icon, item):
+        set_performance_mode(mode)
+    return handler
+
+def make_performance_checked(mode):
+    def checked(item):
+        return normalize_performance_mode(config.get("performance_mode")) == mode
+    return checked
+
+def build_performance_menu_items():
+    return tuple(
+        pystray.MenuItem(
+            profile["label"],
+            make_performance_action(mode),
+            checked=make_performance_checked(mode),
+            radio=True
+        )
+        for mode, profile in PERFORMANCE_PROFILES.items()
+    )
+
+icon = pystray.Icon("RingSpectrum", create_image(), f"环形频谱 v{APP_VERSION}", menu=pystray.Menu(
     pystray.MenuItem("设置", on_settings),
+    pystray.MenuItem("预设", pystray.Menu(build_preset_menu_items)),
+    pystray.MenuItem("性能", pystray.Menu(build_performance_menu_items)),
     pystray.MenuItem("退出", on_quit)
 ))
 
@@ -690,6 +1288,8 @@ t.start()
 buffer_size = 1024
 audio_data = np.zeros(buffer_size)
 p = pyaudio.PyAudio()
+samplerate = 48000
+channels = 1
 
 try:
     wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
@@ -781,8 +1381,8 @@ def update_window_pos(hwnd, x, y, width, height):
 
 screen = pygame.display.set_mode((config["width"], config["height"]), pygame.NOFRAME)
 hwnd = pygame.display.get_wm_info()["window"]
-canvas = pygame.Surface((config["width"], config["height"]), pygame.SRCALPHA)
-vertical_gradient_surface = pygame.Surface((config["width"], config["height"]))
+canvas = None
+vertical_gradient_surface = None
 layered_bitmap = LayeredWindowBitmap()
 using_per_pixel_alpha = bool(config.get("spectrum_root_fade", False))
 initial_vertical_gradient = normalize_color_mode(config.get("color_mode")) == COLOR_MODE_VERTICAL
@@ -823,60 +1423,160 @@ def get_alpha_color(color, alpha):
         alpha
     )
 
-root_fade_mask_key = None
-root_fade_mask = None
+def get_draw_pos(pos):
+    return (int(round(float(pos[0]))), int(round(float(pos[1]))))
 
-
-def make_root_fade_mask(distance_from_root, max_length):
-    max_length = max(1.0, float(max_length))
-    level_size = max(1.0, max_length / ROOT_FADE_LEVELS)
-    levels = np.floor(np.clip(distance_from_root, 0, max_length) / level_size).astype(np.uint16)
-    np.minimum(levels, ROOT_FADE_LEVELS - 1, out=levels)
-    return ((levels * 255) // max(1, ROOT_FADE_LEVELS - 1)).astype(np.uint16)
-
-
-def get_root_fade_mask(width, height, style, is_flipped, is_rotated, max_length, baseline=None, center=None, radius_base=None):
-    global root_fade_mask_key, root_fade_mask
-    key = (
-        int(width),
-        int(height),
-        style,
-        bool(is_flipped),
-        bool(is_rotated),
-        round(float(max_length), 3),
-        None if baseline is None else round(float(baseline), 3),
-        None if center is None else (round(float(center[0]), 3), round(float(center[1]), 3)),
-        None if radius_base is None else round(float(radius_base), 3),
-    )
-    if key == root_fade_mask_key and root_fade_mask is not None:
-        return root_fade_mask
-
-    if style == "bar":
-        if is_rotated:
-            x_distance = np.abs(np.arange(width, dtype=np.float32) - float(baseline))
-            mask = make_root_fade_mask(x_distance[np.newaxis, :], max_length)
-        else:
-            y_distance = np.abs(np.arange(height, dtype=np.float32) - float(baseline))
-            mask = make_root_fade_mask(y_distance[:, np.newaxis], max_length)
-    else:
-        cx, cy = center
-        x = np.arange(width, dtype=np.float32)[np.newaxis, :] - float(cx)
-        y = np.arange(height, dtype=np.float32)[:, np.newaxis] - float(cy)
-        radius = np.sqrt(x * x + y * y)
-        if is_flipped:
-            distance = float(radius_base) - radius
-        else:
-            distance = radius - float(radius_base)
-        mask = make_root_fade_mask(distance, max_length)
-
-    root_fade_mask_key = key
-    root_fade_mask = mask
-    return root_fade_mask
+def ensure_canvas(width, height):
+    global canvas
+    size = (int(width), int(height))
+    if canvas is None or canvas.get_size() != size:
+        canvas = pygame.Surface(size, pygame.SRCALPHA)
+    return canvas
 
 
 vertical_color_mask_key = None
 vertical_color_mask = None
 vertical_gradient_surface_key = None
+fft_window_key = None
+fft_window = None
+log_indices_key = None
+log_indices_cache = None
+bars_buffer_key = None
+bars_buffer = None
+smooth_buffer_key = None
+smooth_buffer = None
+
+
+def clear_vertical_gradient_cache(clear_surface=False):
+    global vertical_color_mask_key, vertical_color_mask
+    global vertical_gradient_surface_key, vertical_gradient_surface
+    vertical_color_mask_key = None
+    vertical_color_mask = None
+    vertical_gradient_surface_key = None
+    if clear_surface:
+        vertical_gradient_surface = None
+
+
+def get_fft_window(length):
+    global fft_window_key, fft_window
+    length = int(length)
+    if fft_window_key != length or fft_window is None:
+        fft_window = np.hanning(length).astype(np.float32, copy=False)
+        fft_window_key = length
+    return fft_window
+
+
+def get_log_indices(fft_len, bars):
+    global log_indices_key, log_indices_cache
+    fft_len = int(fft_len)
+    bars = int(bars)
+    min_idx = 2
+    max_idx = max(3, fft_len // 2)
+    key = (fft_len, bars, min_idx, max_idx)
+    if log_indices_key != key or log_indices_cache is None:
+        indices = np.logspace(np.log10(min_idx), np.log10(max_idx), bars + 1).astype(np.int32)
+        indices = np.clip(indices, 0, max(0, fft_len - 1))
+        log_indices_key = key
+        log_indices_cache = indices
+    return log_indices_cache
+
+
+def ensure_bars_buffer(bars):
+    global bars_buffer_key, bars_buffer
+    bars = int(bars)
+    if bars_buffer_key != bars or bars_buffer is None:
+        bars_buffer = np.zeros(bars, dtype=np.float32)
+        bars_buffer_key = bars
+    return bars_buffer
+
+
+def ensure_smooth_buffer(bars):
+    global smooth_buffer_key, smooth_buffer
+    bars = int(bars)
+    if smooth_buffer_key != bars or smooth_buffer is None:
+        smooth_buffer = np.zeros(bars, dtype=np.float32)
+        smooth_buffer_key = bars
+    return smooth_buffer
+
+
+def smooth_bars(values):
+    count = len(values)
+    if count < 3:
+        return values
+
+    left2, left1, center, right1, right2 = BAR_SMOOTH_KERNEL
+    weight_sum = sum(BAR_SMOOTH_KERNEL)
+    output = ensure_smooth_buffer(count)
+    for index in range(count):
+        output[index] = (
+            values[(index - 2) % count] * left2
+            + values[(index - 1) % count] * left1
+            + values[index] * center
+            + values[(index + 1) % count] * right1
+            + values[(index + 2) % count] * right2
+        ) / weight_sum
+    return output
+
+
+def get_sp_mode():
+    mode = normalize_sp_mode(config.get("sp_mode"))
+    if config.get("sp_mode") != mode:
+        config["sp_mode"] = mode
+    return mode
+
+
+def update_beat_pulse(fft_data, samplerate, frame_index):
+    global beat_previous_energy, beat_last_frame, beat_pulse, beat_flash
+
+    if get_sp_mode() != SP_MODE_BEAT or len(fft_data) < 8:
+        beat_pulse = 0.0
+        beat_flash = 0.0
+        return 0.0, 0.0
+
+    fft_size = max(2, (len(fft_data) - 1) * 2)
+    hz_per_bin = float(samplerate) / fft_size
+    bass_start = max(2, int(35 / hz_per_bin))
+    bass_end = min(len(fft_data), max(bass_start + 1, int(180 / hz_per_bin)))
+    body_end = min(len(fft_data), max(bass_end + 1, int(2400 / hz_per_bin)))
+
+    bass = float(np.mean(fft_data[bass_start:bass_end])) if bass_end > bass_start else 0.0
+    body = float(np.mean(fft_data[bass_end:body_end])) if body_end > bass_end else 0.0
+    energy = math.log1p(bass * 1.55 + body * 0.22)
+
+    if len(beat_energy_history) >= 18:
+        mean = sum(beat_energy_history) / len(beat_energy_history)
+        variance = sum((value - mean) ** 2 for value in beat_energy_history) / len(beat_energy_history)
+        std = math.sqrt(variance)
+        threshold = mean + std * 1.45 + 0.035
+    else:
+        mean = sum(beat_energy_history) / max(1, len(beat_energy_history))
+        std = 0.08
+        threshold = mean * 1.7 + 0.08
+
+    rising = energy > beat_previous_energy * 1.08 and energy > 0.05
+    ready = frame_index - beat_last_frame > max(8, int(get_target_fps() * 0.18))
+    if ready and rising and energy > threshold:
+        strength = max(0.35, min(1.0, (energy - threshold) / (std + 0.06)))
+        beat_pulse = max(beat_pulse, strength)
+        beat_flash = max(beat_flash, strength)
+        beat_last_frame = frame_index
+
+    beat_previous_energy = energy
+    beat_energy_history.append(energy)
+    beat_pulse *= 0.92
+    beat_flash *= 0.82
+    return beat_pulse, beat_flash
+
+
+def apply_beat_color(color, pulse, flash):
+    if pulse <= 0.001 and flash <= 0.001:
+        return color
+    boost = 1.0 + pulse * 0.55 + flash * 0.22
+    return (
+        min(255, int(color[0] * boost)),
+        min(255, int(color[1] * boost)),
+        min(255, int(color[2] * boost))
+    )
 
 
 def make_vertical_color_mask(distance_from_root, max_length):
@@ -957,29 +1657,85 @@ def get_vertical_gradient_surface(color_mask, width, height, style, is_flipped, 
         None if center is None else (round(float(center[0]), 3), round(float(center[1]), 3)),
         None if radius_base is None else round(float(radius_base), 3),
     )
-    if key != vertical_gradient_surface_key or vertical_gradient_surface.get_size() != (width, height):
+    if (
+        key != vertical_gradient_surface_key
+        or vertical_gradient_surface is None
+        or vertical_gradient_surface.get_size() != (width, height)
+    ):
         vertical_gradient_surface = pygame.Surface((width, height))
         update_vertical_gradient_surface(vertical_gradient_surface, color_mask)
         vertical_gradient_surface_key = key
     return vertical_gradient_surface
 
 
-def draw_spectrum_bar(surface, root_pos, tip_pos, color, bar_width, full_alpha):
+def draw_root_fade_spectrum_bar(surface, root_pos, tip_pos, color, bar_width, full_alpha):
+    root_x = float(root_pos[0])
+    root_y = float(root_pos[1])
+    dx = float(tip_pos[0]) - root_x
+    dy = float(tip_pos[1]) - root_y
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return
+
+    segments = max(1, min(get_root_fade_segments(), int(math.ceil(length))))
+    previous = (root_x, root_y)
+    for segment in range(1, segments + 1):
+        ratio = segment / segments
+        current = (root_x + dx * ratio, root_y + dy * ratio)
+        segment_alpha = int(round(full_alpha * (ratio ** 2)))
+        if segment_alpha > 0:
+            pygame.draw.line(
+                surface,
+                get_alpha_color(color, segment_alpha),
+                get_draw_pos(previous),
+                get_draw_pos(current),
+                bar_width
+            )
+        previous = current
+
+    if bar_width > 2:
+        pygame.draw.circle(
+            surface,
+            get_alpha_color(color, full_alpha),
+            get_draw_pos(tip_pos),
+            max(1, bar_width // 2)
+        )
+
+
+def draw_spectrum_bar(surface, root_pos, tip_pos, color, bar_width, full_alpha, root_fade=False):
+    if root_fade:
+        draw_root_fade_spectrum_bar(surface, root_pos, tip_pos, color, bar_width, full_alpha)
+        return
+
     draw_color = get_alpha_color(color, full_alpha)
-    pygame.draw.line(surface, draw_color, root_pos, tip_pos, bar_width)
+    pygame.draw.line(surface, draw_color, get_draw_pos(root_pos), get_draw_pos(tip_pos), bar_width)
     if bar_width > 2:
         pygame.draw.circle(
             surface,
             draw_color,
-            (int(round(tip_pos[0])), int(round(tip_pos[1]))),
+            get_draw_pos(tip_pos),
             max(1, bar_width // 2)
         )
 
 while running:
     frame_count += 1
+    if pending_preset_name:
+        preset_to_apply = pending_preset_name
+        pending_preset_name = None
+        apply_preset(preset_to_apply)
+
     root_fade = bool(config.get("spectrum_root_fade", False))
     color_mode_value = normalize_color_mode(config.get("color_mode"))
     use_vertical_gradient = color_mode_value == COLOR_MODE_VERTICAL
+    if last_use_vertical_gradient and not use_vertical_gradient:
+        clear_vertical_gradient_cache(clear_surface=True)
+    if not last_root_fade and root_fade:
+        clear_vertical_gradient_cache(clear_surface=True)
+    elif last_root_fade and not root_fade:
+        canvas = None
+        layered_bitmap.close()
+    last_use_vertical_gradient = use_vertical_gradient
+    last_root_fade = root_fade
     desired_color_key = VERTICAL_COLOR_KEY if use_vertical_gradient and not root_fade else COLOR_KEY
     show_after_layered_update = False
     show_after_colorkey_update = False
@@ -1013,15 +1769,27 @@ while running:
     if need_resize:
         screen = pygame.display.set_mode((config["width"], config["height"]), pygame.NOFRAME)
         hwnd = pygame.display.get_wm_info()["window"]
-        canvas = pygame.Surface((config["width"], config["height"]), pygame.SRCALPHA)
-        vertical_gradient_surface = pygame.Surface((config["width"], config["height"]))
-        vertical_gradient_surface_key = None
+        canvas = None
+        clear_vertical_gradient_cache(clear_surface=True)
+        if not root_fade:
+            layered_bitmap.close()
+        else:
+            win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
+            show_after_layered_update = True
         set_window_layering(hwnd, root_fade, config["alpha"], desired_color_key)
         active_color_key = desired_color_key
         using_per_pixel_alpha = root_fade
         update_window_pos(hwnd, config["x"], config["y"], config["width"], config["height"])
+        if not root_fade:
+            screen.fill(desired_color_key)
+            pygame.display.update()
         need_resize = False
-    elif need_alpha:
+        need_move = False
+    elif need_move:
+        update_window_pos(hwnd, config["x"], config["y"], config["width"], config["height"])
+        need_move = False
+
+    if need_alpha:
         if not root_fade:
             set_window_layering(hwnd, False, config["alpha"], desired_color_key)
             active_color_key = desired_color_key
@@ -1053,15 +1821,16 @@ while running:
     for event in pygame.event.get():
         pass # 完全通过托盘和面板交互，忽略 pygame 事件
 
-    window = np.hanning(len(audio_data))
+    window = get_fft_window(len(audio_data))
     fft_data = np.abs(np.fft.rfft(audio_data * window))
+    current_beat_pulse, current_beat_flash = update_beat_pulse(fft_data, samplerate, frame_count)
     
-    bars = config["bars"]
-    min_idx = 2
-    max_idx = max(3, len(fft_data) // 2)
-    log_indices = np.logspace(np.log10(min_idx), np.log10(max_idx), bars + 1).astype(int)
+    bars = get_effective_bars()
+    if len(smoothed_fft) != bars:
+        smoothed_fft = np.zeros(bars, dtype=np.float32)
+    log_indices = get_log_indices(len(fft_data), bars)
     
-    current_bars = []
+    current_bars = ensure_bars_buffer(bars)
     for i in range(bars):
         start_idx = log_indices[i]
         end_idx = log_indices[i+1]
@@ -1070,16 +1839,18 @@ while running:
             
         band = fft_data[start_idx:end_idx]
         if len(band) > 0:
-            current_bars.append(np.mean(band))
+            current_bars[i] = np.mean(band)
         else:
-            current_bars.append(0)
+            current_bars[i] = 0
             
-    current_bars = np.array(current_bars) * config["sensitivity"]
-    current_bars = gaussian_filter1d(current_bars, sigma=1.0, mode='wrap')
-    smoothed_fft = np.maximum(current_bars, smoothed_fft * config["decay"])
+    current_bars *= float(config["sensitivity"])
+    current_bars = smooth_bars(current_bars)
+    effective_decay = min(0.995, float(config["decay"]) + current_beat_pulse * 0.08)
+    smoothed_fft *= effective_decay
+    np.maximum(current_bars, smoothed_fft, out=smoothed_fft)
 
     if root_fade:
-        draw_surface = canvas
+        draw_surface = ensure_canvas(config["width"], config["height"])
         draw_surface.fill((0, 0, 0, 0))
     elif use_vertical_gradient:
         draw_surface = screen
@@ -1094,6 +1865,7 @@ while running:
     is_rotated = bool(config.get("spectrum_rotate_90", False))
     full_alpha = int(255 * max(0, min(100, int(config["alpha"]))) / 100)
     draw_alpha = full_alpha if root_fade else 255
+    beat_length_boost = 1.0 + current_beat_pulse * 0.22
     fade_mask = None
     color_mask = None
     gradient_surface = None
@@ -1111,16 +1883,7 @@ while running:
             axis_start = (height - axis_span) / 2
             slot_height = max(1, axis_span) / bars
             bar_width = max(1, int(slot_height * 0.72))
-            if root_fade:
-                fade_mask = get_root_fade_mask(
-                    width,
-                    height,
-                    style,
-                    is_flipped,
-                    is_rotated,
-                    max_len,
-                    baseline=baseline
-                )
+            bar_width = max(1, int(bar_width * (1.0 + current_beat_flash * 0.12)))
             if use_vertical_gradient:
                 color_mask = get_vertical_color_mask(
                     width,
@@ -1149,12 +1912,13 @@ while running:
                 if length < 2:
                     continue
 
-                length = min(length * bar_height_ratio, max_len)
+                length = min(length * beat_length_boost * bar_height_ratio, max_len)
                 y = axis_start + slot_height * i + slot_height / 2
                 x_end = baseline - length if is_flipped else baseline + length
                 color = (255, 255, 255) if use_vertical_gradient else get_spectrum_color(i, bars)
+                color = apply_beat_color(color, current_beat_pulse, current_beat_flash)
 
-                draw_spectrum_bar(draw_surface, (baseline, y), (x_end, y), color, bar_width, draw_alpha)
+                draw_spectrum_bar(draw_surface, (baseline, y), (x_end, y), color, bar_width, draw_alpha, root_fade)
         else:
             margin_x = max(8, width * 0.03)
             edge_padding = max(8, height * 0.06)
@@ -1164,16 +1928,7 @@ while running:
             axis_start = (width - axis_span) / 2
             slot_width = max(1, axis_span) / bars
             bar_width = max(1, int(slot_width * 0.72))
-            if root_fade:
-                fade_mask = get_root_fade_mask(
-                    width,
-                    height,
-                    style,
-                    is_flipped,
-                    is_rotated,
-                    max_len,
-                    baseline=baseline
-                )
+            bar_width = max(1, int(bar_width * (1.0 + current_beat_flash * 0.12)))
             if use_vertical_gradient:
                 color_mask = get_vertical_color_mask(
                     width,
@@ -1202,12 +1957,13 @@ while running:
                 if length < 2:
                     continue
 
-                length = min(length * bar_height_ratio, max_len)
+                length = min(length * beat_length_boost * bar_height_ratio, max_len)
                 x = axis_start + slot_width * i + slot_width / 2
                 y_end = baseline + length if is_flipped else baseline - length
                 color = (255, 255, 255) if use_vertical_gradient else get_spectrum_color(i, bars)
+                color = apply_beat_color(color, current_beat_pulse, current_beat_flash)
 
-                draw_spectrum_bar(draw_surface, (x, baseline), (x, y_end), color, bar_width, draw_alpha)
+                draw_spectrum_bar(draw_surface, (x, baseline), (x, y_end), color, bar_width, draw_alpha, root_fade)
     else:
         center = (width // 2, height // 2)
         radius_outer = min(width, height) / 2
@@ -1216,17 +1972,6 @@ while running:
         ring_size = radius_outer - radius_inner
         angle_offset = np.pi / 2 if is_rotated else 0
         max_len = max(1, ring_size)
-        if root_fade:
-            fade_mask = get_root_fade_mask(
-                width,
-                height,
-                style,
-                is_flipped,
-                is_rotated,
-                max_len,
-                center=center,
-                radius_base=radius_base
-            )
         if use_vertical_gradient:
             color_mask = get_vertical_color_mask(
                 width,
@@ -1258,7 +2003,7 @@ while running:
             if length < 2:
                 continue
                 
-            length = min(length, max_len)
+            length = min(length * beat_length_boost, max_len)
             end_radius = radius_base - length if is_flipped else radius_base + length
             
             start_x = center[0] + radius_base * np.cos(angle)
@@ -1267,9 +2012,10 @@ while running:
             end_x = center[0] + end_radius * np.cos(angle)
             end_y = center[1] + end_radius * np.sin(angle)
             color = (255, 255, 255) if use_vertical_gradient else get_spectrum_color(i, bars, seamless=True)
+            color = apply_beat_color(color, current_beat_pulse, current_beat_flash)
             
-            bar_width = max(1, int((2 * np.pi * radius_inner / bars) * 0.8))
-            draw_spectrum_bar(draw_surface, (start_x, start_y), (end_x, end_y), color, bar_width, draw_alpha)
+            bar_width = max(1, int((2 * np.pi * radius_inner / bars) * 0.8 * (1.0 + current_beat_flash * 0.12)))
+            draw_spectrum_bar(draw_surface, (start_x, start_y), (end_x, end_y), color, bar_width, draw_alpha, root_fade)
 
     if root_fade:
         layered_bitmap.update(hwnd, canvas, config["x"], config["y"], fade_mask, color_mask)
@@ -1285,7 +2031,7 @@ while running:
     if show_after_colorkey_update:
         show_window_no_activate(hwnd)
         force_z_update = True
-    clock.tick(60)
+    clock.tick(get_target_fps())
 
 save_config()
 if 'stream' in globals():
