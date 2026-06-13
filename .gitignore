@@ -12,6 +12,8 @@ env/
 # Packaging and build output
 build/
 dist/
+releases/
+tools/specs/
 *.spec
 *.egg-info/
 .eggs/

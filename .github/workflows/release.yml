@@ -26,32 +26,15 @@ jobs:
         run: python -m pip install -r requirements-build.txt
 
       - name: Build executable
-        run: >
-          python -m PyInstaller
-          --noconfirm
-          --onefile
-          --windowed
-          --name RingSpectrum
-          --distpath build/release
-          --workpath build/work
-          --specpath .
-          main.py
-
-      - name: Assemble delivery package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path build/delivery -Force | Out-Null
-          Copy-Item build/release/RingSpectrum.exe build/delivery/RingSpectrum.exe
-          Copy-Item config.json build/delivery/config.json
-          Copy-Item USER_GUIDE.txt build/delivery/USER_GUIDE.txt
-          Copy-Item CHANGELOG.txt build/delivery/CHANGELOG.txt
-          Copy-Item build/release/RingSpectrum.exe "RingSpectrum_${{ github.ref_name }}.exe"
-          Compress-Archive -Path build/delivery/* -DestinationPath "RingSpectrum_${{ github.ref_name }}_Delivery.zip" -Force
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          .\build_release.ps1 -Version $version
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            RingSpectrum_${{ github.ref_name }}.exe
-            RingSpectrum_${{ github.ref_name }}_Delivery.zip
+            releases/${{ github.ref_name }}/RingSpectrum_${{ github.ref_name }}.exe
+            releases/${{ github.ref_name }}/RingSpectrum_${{ github.ref_name }}_Delivery.zip
           generate_release_notes: true

@@ -1,5 +1,15 @@
 Ring Spectrum Changelog
 
+v0.5.1
+- Added a settings-panel startup toggle that creates or removes a Windows Startup folder shortcut.
+- Moved config, presets, startup shortcut handling, audio capture, window helpers, tray menu, settings panel, and spectrum rendering into focused modules.
+- Kept visual presets independent from startup and performance preferences.
+- Added adjustable beat-mode controls for intensity, sensitivity, expansion, brightness pulse, and tail boost.
+- Replaced spectrum balance modes with an 8-band spectrum equalizer for amplitude and sensitivity tuning.
+- Improved screen alignment behavior and made the tray icon cleaner.
+- Removed the experimental ring center acrylic/mica effect; ring centers are transparent again.
+- Updated documentation for startup and the new module layout.
+
 v0.4.0
 - Added app version display in the settings window and tray tooltip.
 - Added preset copy, rename, import, and export actions in the settings panel.

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.4.0"
+    [string]$Version = "0.5.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -7,9 +7,11 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = Join-Path $root "venv\Scripts\python.exe"
 $releaseDir = Join-Path $root "build\release-v$Version"
 $deliveryDir = Join-Path $root "build\delivery-v$Version"
-$versionedExe = Join-Path $root "RingSpectrum_v${Version}.exe"
-$versionedZip = Join-Path $root "RingSpectrum_v${Version}_Delivery.zip"
-$compatZip = Join-Path $root "RingSpectrum_Delivery.zip"
+$artifactDir = Join-Path $root "releases\v$Version"
+$specDir = Join-Path $root "tools\specs"
+$versionedExe = Join-Path $artifactDir "RingSpectrum_v${Version}.exe"
+$versionedZip = Join-Path $artifactDir "RingSpectrum_v${Version}_Delivery.zip"
+$compatZip = Join-Path $artifactDir "RingSpectrum_Delivery.zip"
 
 if (-not (Test-Path $python)) {
     throw "Virtual environment Python not found: $python"
@@ -17,6 +19,9 @@ if (-not (Test-Path $python)) {
 
 Push-Location $root
 try {
+    New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $specDir -Force | Out-Null
+
     & $python -m PyInstaller `
         --noconfirm `
         --onefile `
@@ -24,7 +29,7 @@ try {
         --name RingSpectrum `
         --distpath $releaseDir `
         --workpath build `
-        --specpath . `
+        --specpath $specDir `
         main.py
 
     $buildRoot = [IO.Path]::GetFullPath((Join-Path $root "build"))
