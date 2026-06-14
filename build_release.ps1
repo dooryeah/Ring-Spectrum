@@ -40,7 +40,8 @@ try {
     New-Item -ItemType Directory -Path $deliveryDir | Out-Null
 
     Copy-Item -LiteralPath (Join-Path $releaseDir "RingSpectrum.exe") -Destination $deliveryDir
-    Copy-Item -LiteralPath (Join-Path $root "config.json") -Destination $deliveryDir
+    $env:RINGSPECTRUM_RELEASE_CONFIG = Join-Path $deliveryDir "config.json"
+    & $python -c "import json, os; from pathlib import Path; import app_config; Path(os.environ['RINGSPECTRUM_RELEASE_CONFIG']).write_text(json.dumps(app_config.DEFAULT_CONFIG, indent=4, ensure_ascii=False), encoding='utf-8')"
     Copy-Item -LiteralPath (Join-Path $root "USER_GUIDE.txt") -Destination $deliveryDir
     Copy-Item -LiteralPath (Join-Path $root "CHANGELOG.txt") -Destination $deliveryDir
 

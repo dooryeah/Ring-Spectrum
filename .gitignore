@@ -21,7 +21,8 @@ RingSpectrum.exe
 RingSpectrum_Delivery.zip
 RingSpectrum_v*_Delivery.zip
 RingSpectrum_v*.exe
-BeatPulseExperiment/*.exe
+BeatPulseExperiment/
+config.json
 
 # Test, lint, and coverage caches
 .pytest_cache/
